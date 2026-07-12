@@ -57,25 +57,25 @@ static mc::RegisterMCTargetOptionsFlags MOF;
 
 static cl::opt<std::string>
     InputFilename(cl::Positional, cl::desc("<input file>"), cl::init("-"));
-
-static cl::opt<std::string> OutputFilename("o", cl::desc("Output filename"),
+#if 0
+static cl::opt<std::string> OutputFilename("o-aebi", cl::desc("Output filename"),
                                            cl::value_desc("filename"),
                                            cl::init("-"));
-
-static cl::opt<std::string> SplitDwarfFile("split-dwarf-file",
+#endif
+static cl::opt<std::string> SplitDwarfFile("split-dwarf-file-aebi",
                                            cl::desc("DWO output filename"),
                                            cl::value_desc("filename"));
 
-static cl::opt<bool> ShowEncoding("show-encoding",
+static cl::opt<bool> ShowEncoding("show-encoding-aebi",
                                   cl::desc("Show instruction encodings"));
 
 static cl::opt<bool> RelaxELFRel(
-    "relax-relocations", cl::init(true),
+    "relax-relocations-aebi", cl::init(true),
     cl::desc("Emit R_X86_64_GOTPCRELX instead of R_X86_64_GOTPCREL"));
 
 #if 0
 static cl::opt<DebugCompressionType> CompressDebugSections(
-    "compress-debug-sections", cl::ValueOptional,
+    "compress-debug-sections-aebi", cl::ValueOptional,
     cl::init(DebugCompressionType::None),
     cl::desc("Choose DWARF debug sections compression:"),
     cl::values(clEnumValN(DebugCompressionType::None, "none", "No compression"),
@@ -86,31 +86,32 @@ static cl::opt<DebugCompressionType> CompressDebugSections(
 #endif
 
 static cl::opt<bool>
-    ShowInst("show-inst", cl::desc("Show internal instruction representation"));
+    ShowInst("show-inst-aebi",
+             cl::desc("Show internal instruction representation"));
 
 static cl::opt<bool>
-    ShowInstOperands("show-inst-operands",
+    ShowInstOperands("show-inst-operands-aebi",
                      cl::desc("Show instructions operands as parsed"));
 
 static cl::opt<unsigned>
-    OutputAsmVariant("output-asm-variant",
+    OutputAsmVariant("output-asm-variant-aebi",
                      cl::desc("Syntax variant to use for output printing"));
 
 static cl::opt<bool>
-    PrintImmHex("print-imm-hex", cl::init(false),
+    PrintImmHex("print-imm-hex-aebi", cl::init(false),
                 cl::desc("Prefer hex format for immediate values"));
 
 static cl::list<std::string>
-    DefineSymbol("defsym",
+    DefineSymbol("defsym-aebi",
                  cl::desc("Defines a symbol to be an integer constant"));
 
 static cl::opt<bool>
-    PreserveComments("preserve-comments",
+    PreserveComments("preserve-comments-aebi",
                      cl::desc("Preserve Comments in outputted assembly"));
 
 enum OutputFileType { OFT_Null, OFT_AssemblyFile, OFT_ObjectFile };
 static cl::opt<OutputFileType>
-    FileType("filetype", cl::init(OFT_AssemblyFile),
+    FileType("filetype-aebi", cl::init(OFT_AssemblyFile),
              cl::desc("Choose an output file type:"),
              cl::values(clEnumValN(OFT_AssemblyFile, "asm",
                                    "Emit an assembly ('.s') file"),
@@ -119,67 +120,69 @@ static cl::opt<OutputFileType>
                         clEnumValN(OFT_ObjectFile, "obj",
                                    "Emit a native object ('.o') file")));
 
-static cl::list<std::string> IncludeDirs("I",
+static cl::list<std::string> IncludeDirs("I-aebi",
                                          cl::desc("Directory of include files"),
                                          cl::value_desc("directory"),
                                          cl::Prefix);
 
 static cl::opt<std::string>
-    ArchName("arch", cl::desc("Target arch to assemble for, "
-                              "see -version for available targets"));
+    ArchName("arch-aebi", cl::desc("Target arch to assemble for, "
+                                   "see -version for available targets"));
 
 static cl::opt<std::string>
-    TripleName("triple", cl::desc("Target triple to assemble for, "
-                                  "see -version for available targets"));
+    TripleName("triple-aebi", cl::desc("Target triple to assemble for, "
+                                       "see -version for available targets"));
 
 static cl::opt<std::string>
-    MCPU("mcpu",
+    MCPU("mcpu-aebi",
          cl::desc("Target a specific cpu type (-mcpu=help for details)"),
          cl::value_desc("cpu-name"), cl::init(""));
 
 static cl::list<std::string>
-    MAttrs("mattr", cl::CommaSeparated,
+    MAttrs("mattr-aebi", cl::CommaSeparated,
            cl::desc("Target specific attributes (-mattr=help for details)"),
            cl::value_desc("a1,+a2,-a3,..."));
 
-static cl::opt<bool> PIC("position-independent",
+static cl::opt<bool> PIC("position-independent-aebi",
                          cl::desc("Position independent"), cl::init(false));
 
 static cl::opt<bool>
-    LargeCodeModel("large-code-model",
+    LargeCodeModel("large-code-model-aebi",
                    cl::desc("Create cfi directives that assume the code might "
                             "be more than 2gb away"));
 
 static cl::opt<bool>
-    NoInitialTextSection("n", cl::desc("Don't assume assembly file starts "
-                                       "in the text section"));
+    NoInitialTextSection("n-aebi", cl::desc("Don't assume assembly file starts "
+                                            "in the text section"));
 
 static cl::opt<bool>
-    GenDwarfForAssembly("g",
+    GenDwarfForAssembly("g-aebi",
                         cl::desc("Generate dwarf debugging info for assembly "
                                  "source files"));
 
 static cl::opt<std::string>
-    DebugCompilationDir("fdebug-compilation-dir",
+    DebugCompilationDir("fdebug-compilation-dir-aebi",
                         cl::desc("Specifies the debug info's compilation dir"));
 
 static cl::list<std::string>
-    DebugPrefixMap("fdebug-prefix-map",
+    DebugPrefixMap("fdebug-prefix-map-aebi",
                    cl::desc("Map file source paths in debug info"),
                    cl::value_desc("= separated key-value pairs"));
 
 static cl::opt<std::string> MainFileName(
-    "main-file-name",
+    "main-file-name-aebi",
     cl::desc("Specifies the name we should consider the input file"));
 
-static cl::opt<bool> SaveTempLabels("save-temp-labels",
+#if LLVM_VERSION_MAJOR < 22
+static cl::opt<bool> SaveTempLabels("save-temp-labels-aebi",
                                     cl::desc("Don't discard temporary labels"));
+#endif
 
 static cl::opt<bool> LexMasmIntegers(
-    "masm-integers",
+    "masm-integers-aebi",
     cl::desc("Enable binary and hex masm integers (0b110 and 0ABCh)"));
 
-static cl::opt<bool> NoExecStack("no-exec-stack",
+static cl::opt<bool> NoExecStack("no-exec-stack-aebi",
                                  cl::desc("File doesn't need an exec stack"));
 
 enum ActionType {

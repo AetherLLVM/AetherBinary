@@ -4,18 +4,30 @@
 // See LICENSE file in the root directory for full license text.
 
 /*
-Usage: /path/to/icpp -I../include aether-binary.cc arm64-ios
+Usage: /path/to/icpp aether-binary.cc -- arm64-ios
+
+Note: Don't miss the double dashes --, otherwise icpp will treat the input
+binary file as a C++ source file, which will fail the whole command running.
 */
 
-import std;
-
-namespace fs = std::filesystem;
+#include "aether-comm.h"
 
 int main(int argc, const char *argv[]) {
   if (argc < 2) {
     std::print("Usage: {} /path/to/binary\n", argv[0]);
     return 1;
   }
+  // load LLVM and AetherBinary libraries, so we can use their APIs directly
+  // within ICPP runtime environment.
+  load_libraries(argv[0]);
 
+  // load and dump the input binary file
+  auto bin = aether::New(argv[1]);
+  if (!bin) {
+    std::print("Failed to parse {}", argv[1]);
+    return -1;
+  }
+  bin->dump();
+  aether::Delete(bin);
   return 0;
 }

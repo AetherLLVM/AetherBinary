@@ -6,6 +6,7 @@
 #include "Disassembler.h"
 #include "AetherArch.h"
 #include "AetherBinaryPriv.hpp"
+#include "AetherCommop.h"
 
 #include "llvm-c/Target.h"
 #include "llvm/Config/config.h"
@@ -465,7 +466,7 @@ std::string Disassembler::assemble(const char *asmcode,
   }
 
   DisassemblerContext *ctx = (DisassemblerContext *)m_ctx;
-  std::string triple("-triple=");
+  std::string triple("-triple-aebi=");
   if (ctx->TripleName == "x86-none-linux-android" ||
       ctx->TripleName == "x86-pc-windows-msvc") {
     triple += "i386-apple-macosx";
@@ -473,8 +474,8 @@ std::string Disassembler::assemble(const char *asmcode,
     triple += ctx->TripleName;
   }
   const char *argv[] = {
-      "diser",
-      "-show-encoding",
+      AETHER_LIB_NAME,
+      "-show-encoding-aebi",
       triple.c_str(),
       asmcode,
   };
