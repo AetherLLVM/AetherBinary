@@ -63,5 +63,7 @@ int main(int argc, const char *argv[]) {
       dqpath(llvm_build_dir, "llvm"));
   command("cmake --build {} --target install -- -j8",
           dqpath(aether_binary_build_dir));
+
+  std::print("Build completed.\n");
   return 0;
 }
