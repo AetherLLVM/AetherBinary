@@ -1,3 +1,8 @@
+# AetherBinary - A library for MachO/ELF/PE analysis.
+# Copyright (c) 2026 Jesse Liu <neoliu2011@gmail.com>
+# SPDX-License-Identifier: AGPL-3.0-or-later */
+# See LICENSE file in the root directory for full license text.
+
 cmake_minimum_required(VERSION 3.20)
 project(AetherBinary VERSION 0.1.0 LANGUAGES CXX)
 
@@ -42,10 +47,16 @@ set(SOURCE_FILES
   src/Disassembler.cpp
 )
 
+# find the dependent LLVM package, which is built in the previous step
+find_package(LLVM CONFIG REQUIRED)
+
 add_library(AetherBinary SHARED
   ${SOURCE_FILES}
   ${HEADER_FILES}
 )
+
+# link the LLVM shared library
+target_link_libraries(AetherBinary PRIVATE LLVM)
 
 target_include_directories(AetherBinary PUBLIC
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
