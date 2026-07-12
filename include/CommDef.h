@@ -16,7 +16,7 @@
 #endif // end of _WIN32
 
 #if __APPLE__ || __linux__
-typedef size_t addr_t;
+typedef unsigned long addr_t;
 #define ADDRFMT "%lx"
 #else
 typedef unsigned long long addr_t;

@@ -4,6 +4,12 @@
 // See LICENSE file in the root directory for full license text.
 
 #include "AetherOther.h"
+#include "AetherCommop.h"
+
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Object/ObjectFile.h>
+
+using namespace llvm;
 
 namespace aether {
 
@@ -37,7 +43,7 @@ bool AebiBinary::analyze(const void *llvmbin) {
   }
   // section
   for (int i = 0; i < (int)mfhdr->info.nsect; i++) {
-    const ManaSect *ms = mfhdr->sect(i);
+    const AebiSect *ms = mfhdr->sect(i);
     auto &newsect =
         m_sects.insert(std::make_pair(ms->addr, Section())).first->second;
     newsect.addr = ms->addr;
@@ -48,7 +54,7 @@ bool AebiBinary::analyze(const void *llvmbin) {
   }
   int prog = 1, progtmp;
   char progprefix[128];
-  sprintf(progprefix, AETHER_LIB_NAME " is loading analyzed functions");
+  snprintf(progprefix, sizeof(progprefix), AETHER_LIB_NAME " is loading analyzed functions");
   // function
   for (int i = 0; i < (int)mfhdr->nfunc; i++) {
     analyze_progress(progprefix, prog++, (int)mfhdr->nfunc, progtmp);
@@ -78,7 +84,7 @@ bool AebiBinary::analyze(const void *llvmbin) {
     // instruction
     newfunc.insns.resize(mf->ninsn);
     for (int n = 0; n < (int)mf->ninsn; n++) {
-      const ManaInsn *mi = mfhdr->insn(mf, n);
+      const AebiInsn *mi = mfhdr->insn(mf, n);
 #if 0
       addr_t insnaddr = mf->rvastart + mi->fnoff;
       if (insnaddr == 0 || insnaddr == 0) {

@@ -5,7 +5,9 @@
 
 #pragma once
 
-#include "CommDef.h"
+#include "AetherMeta.h"
+
+#include <set>
 
 namespace aether {
 

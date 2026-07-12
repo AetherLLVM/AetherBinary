@@ -54,10 +54,13 @@ int main(int argc, const char *argv[]) {
   }
   auto aether_binary_build_dir =
       script_dir / (std::string("build") + "-" + build_type);
-  command("cmake -S {} -B {} -G Ninja -DCMAKE_BUILD_TYPE={} "
-          "-DCMAKE_PREFIX_PATH={}",
-          dqpath(script_dir), dqpath(aether_binary_build_dir), build_type,
-          dqpath(llvm_build_dir, "install"));
+  command(
+      "cmake -S {} -B {} -G Ninja -DCMAKE_BUILD_TYPE={} "
+      "-DCMAKE_PREFIX_PATH={} -DCMAKE_INSTALL_PREFIX={} -DLLVM_BUILD_DIR={}",
+      dqpath(script_dir), dqpath(aether_binary_build_dir), build_type,
+      dqpath(llvm_build_dir, "install"),
+      dqpath(aether_binary_build_dir, "install"),
+      dqpath(llvm_build_dir, "llvm"));
   command("cmake --build {} --target install -- -j8",
           dqpath(aether_binary_build_dir));
   return 0;

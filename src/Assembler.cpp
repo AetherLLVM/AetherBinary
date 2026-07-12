@@ -332,8 +332,8 @@ static int AssembleInput(void *ctx, const char *ProgName,
   return Res;
 }
 
-int main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
-  // let Disassembler do this
+int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
+  // let aether::Disassembler do this
 #if 0
   InitLLVM X(argc, argv);
 
@@ -434,11 +434,15 @@ int main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
   assert(STI && "Unable to create subtarget info!");
 #endif
 
-  // FIXME: This is not pretty. MCContext has a ptr to MCObjectFileInfo and
-  // MCObjectFileInfo needs a MCContext reference in order to initialize itself.
+// FIXME: This is not pretty. MCContext has a ptr to MCObjectFileInfo and
+// MCObjectFileInfo needs a MCContext reference in order to initialize itself.
 #if LLVM_VERSION_MAJOR >= 14
+#if USE_CACHE_INST
+  MCContext Ctx(TheTriple, MAI, MRI, STI, &SrcMgr, &MCOptions);
+#else
   MCContext Ctx(TheTriple, MAI.get(), MRI.get(), STI.get(), &SrcMgr,
                 &MCOptions);
+#endif
   std::unique_ptr<MCObjectFileInfo> MOFI(
       TheTarget->createMCObjectFileInfo(Ctx, PIC, LargeCodeModel));
   Ctx.setObjectFileInfo(MOFI.get());
@@ -452,8 +456,10 @@ int main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
   MOFI.InitMCObjectFileInfo(TheTriple, PIC, Ctx, LargeCodeModel);
 #endif
 
+#if LLVM_VERSION_MAJOR < 22
   if (SaveTempLabels)
     Ctx.setAllowTemporaryLabels(false);
+#endif
 
   Ctx.setGenDwarfForAssembly(GenDwarfForAssembly);
   // Default to 4 for dwarf version.
@@ -531,6 +537,8 @@ int main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
     MCCodeEmitter *CE = nullptr;
     if (ShowEncoding)
       CE = nullptr; // TheTarget_createMCCodeEmitter(*MCII, *MRI, Ctx);
+    else
+      (void)CE;
 
     MCAsmBackend *MAB(
         nullptr); // TheTarget_createMCAsmBackend(*STI, *MRI, MCOptions));
@@ -608,6 +616,8 @@ int main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
   if (disassemble)
     Res = Disassembler::disassemble(*TheTarget, TripleName, *STI, *Str, *Buffer,
                                     SrcMgr, Ctx, *OS, MCOptions);
+#else
+  (void)disassemble;
 #endif
 
   // Keep output if no errors.

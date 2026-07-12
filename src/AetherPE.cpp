@@ -4,7 +4,7 @@
 // See LICENSE file in the root directory for full license text.
 
 #include "AetherPE.h"
-#include "AetherBinaryPriv.h"
+#include "AetherBinaryPriv.hpp"
 
 #include <llvm/DebugInfo/PDB/IPDBRawSymbol.h>
 #include <llvm/DebugInfo/PDB/IPDBSession.h>
@@ -126,7 +126,14 @@ bool PEBinary::analyze(const void *llvmbin) {
       continue;
     }
     StringRef name;
+#if LLVM_VERSION_MAJOR >= 22
+    err = exp.getSymbolName(name);
+    if (err) {
+      continue;
+    }
+#else
     exp.getSymbolName(name);
+#endif
     auto &newfunc =
         m_funcs.insert(std::make_pair(fnaddr, Function())).first->second;
     newfunc.start = fnaddr;

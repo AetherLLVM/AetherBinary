@@ -4,12 +4,14 @@
 // See LICENSE file in the root directory for full license text.
 
 #include "AetherMachO.h"
-#include "AetherBinaryPriv.h"
+#include "AetherBinaryPriv.hpp"
 #include "Disassembler.h"
 
 #include <llvm/BinaryFormat/MachO.h>
 #include <llvm/DebugInfo/DWARF/DWARFContext.h>
 #include <llvm/Object/MachO.h>
+
+#include "MachOTrie.hpp"
 
 #define ENABLE_ENCRYPT_FLAG 0
 #define obj ((object::MachOObjectFile *)llvmbin)
@@ -148,8 +150,8 @@ void MachOBinary::initImports(const void *llvmbin) {
     newfunc.start = addr;
     log_newfunc(&newfunc);
 
-    int symidx = obj->getIndirectSymbolTableEntry(obj->getDysymtabLoadCommand(),
-                                                  stubindsymidx + i);
+    auto symidx = obj->getIndirectSymbolTableEntry(
+        obj->getDysymtabLoadCommand(), stubindsymidx + i);
     if (symidx >= obj->getSymtabLoadCommand().nsyms) {
       strfmt(newfunc.name, "imp.swift_" ADDRFMT "", addr);
       continue;
@@ -262,7 +264,7 @@ void MachOBinary::parseObjcStubs() {
       continue;
     int64_t imm = instadrp.getOperand(1).getImm();
     int64_t page = (addr + (imm << 12)) & ~((1 << 12) - 1);
-    int64_t selrefaddr = page + instldr.getOperand(2).getImm() * 8;
+    auto selrefaddr = (addr_t)(page + instldr.getOperand(2).getImm() * 8);
     if (selrefaddr < sectselref->addr ||
         selrefaddr >= sectselref->addr + sectselref->size)
       continue;
@@ -390,7 +392,17 @@ bool MachOBinary::analyze(const void *llvmbin) {
   }
 #endif
 
+  // traval export
+  auto exptrie = obj->getDyldInfoExportsTrie();
   std::vector<mach_o::trie::Entry> expsyms;
+  if (exptrie.size()) {
+    try {
+      mach_o::trie::parseTrie((uint8_t *)exptrie.data(),
+                              (uint8_t *)(exptrie.data() + exptrie.size()),
+                              expsyms);
+    } catch (...) {
+    }
+  }
   for (auto &lc : obj->load_commands()) {
     if (lc.C.cmd == MachO::LC_MAIN) {
       auto lcentry = obj->getEntryPointCommand(lc);
@@ -435,46 +447,6 @@ bool MachOBinary::analyze(const void *llvmbin) {
     log_newfunc(&newfunc);
   }
 
-  size_t size;
-  const char *machdr = fileBuffer(size);
-  MagicObjc objc((mach_header_64 *)machdr, machdr, machdr + size);
-  if (obj->is64Bit() && hasObjc() && objc.parse()) {
-    for (auto &c : objc.allClasses) {
-      std::vector<std::pair<uint64_t, const char *>> meths;
-      for (auto &m : c.second.classMethods) {
-        meths.push_back({m.first, m.second.data()});
-      }
-      meths.push_back({0, nullptr});
-      for (auto &m : c.second.instanceMethods) {
-        meths.push_back({m.first, m.second.data()});
-      }
-      bool isclassmeth = true;
-      for (auto m : meths) {
-        const char *prefix = isclassmeth ? "+" : "-";
-        if (m.second == nullptr) {
-          isclassmeth = false;
-          continue;
-        }
-        std::string fullname;
-        strfmt(fullname, "%s[%s %s]", prefix, c.second.name.data(), m.second);
-        addr_t start = m.first;
-        switch (archType()) {
-        case ARMV5TE:
-        case ARM:
-          start &= ~1;
-          break;
-
-        default:
-          break;
-        }
-        auto &newfunc =
-            m_funcs.insert(std::make_pair(start, Function())).first->second;
-        newfunc.start = m.first;
-        newfunc.name = fullname.data();
-        log_newfunc(&newfunc);
-      }
-    }
-  }
   for (auto &lc : obj->load_commands()) {
     if (lc.C.cmd == MachO::LC_FUNCTION_STARTS) {
       auto ledlc = obj->getLinkeditDataLoadCommand(lc);

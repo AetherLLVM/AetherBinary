@@ -7,18 +7,19 @@
 
 #define GET_REGINFO_ENUM
 #define GET_INSTRINFO_ENUM
-#include "llvm/../../lib/Target/AArch64/AArch64GenInstrInfo.inc"
-#include "llvm/../../lib/Target/AArch64/AArch64GenRegisterInfo.inc"
+#include <Target/AArch64/AArch64GenInstrInfo.inc>
+#include <Target/AArch64/AArch64GenRegisterInfo.inc>
 
 #define GET_REGINFO_ENUM
 #define GET_INSTRINFO_ENUM
-#include "llvm/../../lib/Target/ARM/ARMGenInstrInfo.inc"
-#include "llvm/../../lib/Target/ARM/ARMGenRegisterInfo.inc"
+#include <Target/ARM/ARMGenInstrInfo.inc>
+#include <Target/ARM/ARMGenRegisterInfo.inc>
 
 #define GET_REGINFO_ENUM
 #define GET_INSTRINFO_ENUM
-#include "llvm/../../lib/Target/X86/X86GenInstrInfo.inc"
-#include "llvm/../../lib/Target/X86/X86GenRegisterInfo.inc"
+#include <Target/X86/X86GenInstrInfo.inc>
+#include <Target/X86/X86GenRegisterInfo.inc>
+
 #include "llvm/MC/MCInst.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryBuffer.h"

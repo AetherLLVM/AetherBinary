@@ -4,6 +4,8 @@
 // See LICENSE file in the root directory for full license text.
 
 #include "Disassembler.h"
+#include "AetherArch.h"
+#include "AetherBinaryPriv.hpp"
 
 #include "llvm-c/Target.h"
 #include "llvm/Config/config.h"
@@ -44,6 +46,8 @@
 #include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
+
+int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx);
 
 namespace aether {
 
@@ -241,17 +245,32 @@ public:
                  "+sha2,+sha3,+v8.1a,+v8.2a,+v8.3a,+v8.4a,+v8.5a,+zcm,+zcz";
     }
 
+    Triple triple(TripleName);
+
+#if LLVM_VERSION_MAJOR >= 22
+    MRI = Target->createMCRegInfo(triple);
+#else
     MRI = Target->createMCRegInfo(TripleName);
-#if LLVM_VERSION_MAJOR >= 11
+#endif
+
+#if LLVM_VERSION_MAJOR >= 22
+    MCTargetOptions mctops;
+    MAI = Target->createMCAsmInfo(*MRI, triple, mctops);
+#elif LLVM_VERSION_MAJOR >= 11
     MCTargetOptions mctops;
     MAI = Target->createMCAsmInfo(*MRI, TripleName, mctops);
 #else
     MAI = Target->createMCAsmInfo(*MRI, TripleName);
 #endif
-    MII = Target->createMCInstrInfo();
-    STI = Target->createMCSubtargetInfo(TripleName, "", features);
 
-    Triple triple(TripleName);
+    MII = Target->createMCInstrInfo();
+
+#if LLVM_VERSION_MAJOR >= 22
+    STI = Target->createMCSubtargetInfo(triple, "", features);
+#else
+    STI = Target->createMCSubtargetInfo(TripleName, "", features);
+#endif
+
 #if LLVM_VERSION_MAJOR >= 14
     const MCTargetOptions MCOptions = mc::InitMCTargetOptionsFromFlags();
     MCCTX = new MCContext(triple, MAI, MRI, STI, &SrcMgr, &MCOptions);
@@ -283,11 +302,18 @@ public:
         Target->createMCCodeEmitter(*MII, *MRI, *MCCTX));
 #endif
 
+#if LLVM_VERSION_MAJOR >= 22
+    IP = Target->createMCInstPrinter(Triple(TripleName), 0, *MAI, *MII, *MRI);
+    Str = Target->createAsmStreamer(
+        *MCCTX, std::make_unique<formatted_raw_ostream>(TOS.os()),
+        std::unique_ptr<MCInstPrinter>(IP), std::move(MCE), std::move(MAB));
+#else
     IP = Target->createMCInstPrinter(Triple(TripleName), 0, *MAI, *MII, *MRI);
     Str = Target->createAsmStreamer(
         *MCCTX, std::make_unique<formatted_raw_ostream>(TOS.os()),
         /*asmverbose*/ true, /*useDwarfDirectory*/ true, IP, std::move(MCE),
         std::move(MAB), true);
+#endif
   }
 
   MCTargetAsmParser *createTempMCTargetAsmParser(MCAsmParser *MAP) {
@@ -385,19 +411,19 @@ void Disassembler::print(llvm::MCInst &inst, std::string &text, int oplen,
   if (oplen) {
     switch (ctx->STI->getTargetTriple().getArch()) {
     case Triple::aarch64: {
-      mana::MachineARM64 m;
+      MachineARM64 m;
       dstAddr = m.dstAddr(&inst, oplen, addr);
       break;
     }
     case Triple::thumb:
     case Triple::arm: {
-      mana::MachineARM m;
+      MachineARM m;
       dstAddr = m.dstAddr(&inst, oplen, addr);
       break;
     }
     case Triple::x86_64:
     case Triple::x86: {
-      mana::MachineX86 m;
+      MachineX86 m;
       dstAddr = m.dstAddr(&inst, oplen, addr);
       break;
     }
@@ -405,29 +431,6 @@ void Disassembler::print(llvm::MCInst &inst, std::string &text, int oplen,
       break;
     }
   }
-}
-
-const char *Disassembler::parseOpcode(const char *asmcode,
-                                      unsigned char opcode[20]) {
-  // encoding: [0xe0,0x87,0x40,0xa9]
-  const char *start = strstr(asmcode, "g: [0");
-  opcode[0] = 0;
-  if (start == nullptr) {
-    return nullptr;
-  }
-  start += 4;
-
-  unsigned char *optr = &opcode[1];
-  for (opcode[0] = 0;;) {
-    optr[opcode[0]] = (unsigned char)strtoul(start, (char **)&start, 16);
-    opcode[0]++;
-    if (start[0] == ']') {
-      break;
-    } else {
-      start++;
-    }
-  }
-  return start;
 }
 
 static const char *parseOpcode(const char *asmcode, unsigned char opcode[20]) {
@@ -834,19 +837,19 @@ uint64_t Disassembler::branchTarget(const unsigned char *mc, uint64_t addr,
   if (!dstAddr && oplen) {
     switch (arch) {
     case Triple::aarch64: {
-      mana::MachineARM64 m;
+      MachineARM64 m;
       dstAddr = m.dstAddr(&inst, oplen, addr);
       break;
     }
     case Triple::thumb:
     case Triple::arm: {
-      mana::MachineARM m;
+      MachineARM m;
       dstAddr = m.dstAddr(&inst, oplen, addr);
       break;
     }
     case Triple::x86_64:
     case Triple::x86: {
-      mana::MachineX86 m;
+      MachineX86 m;
       dstAddr = m.dstAddr(&inst, oplen, addr);
       break;
     }
@@ -1049,7 +1052,7 @@ typedef enum ConditionTypeX64 {
 } ConditionTypeX64;
 
 struct rflags_t {
-  rfbits bit;
+  rfbits_t bit;
   const uint64_t *gpr;
 };
 
@@ -1161,7 +1164,7 @@ static const void *regContextHitCondFuncs[] = {
 static bool regContextHitCond(const uint64_t *gprs, uint64_t eflags,
                               ConditionTypeX64 cond) {
   rflags_t fv;
-  fv.bit = *(rfbits *)&eflags;
+  fv.bit = *(rfbits_t *)&eflags;
   fv.gpr = gprs;
   if (cond < CONDT_x64_end) {
     return ((bool (*)(rflags_t &))regContextHitCondFuncs[cond])(fv);

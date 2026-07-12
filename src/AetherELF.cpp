@@ -4,7 +4,7 @@
 // See LICENSE file in the root directory for full license text.
 
 #include "AetherELF.h"
-#include "AetherBinaryPriv.h"
+#include "AetherBinaryPriv.hpp"
 #include "Disassembler.h"
 
 #include <llvm/Object/ELFObjectFile.h>
@@ -447,7 +447,7 @@ static void initELFFnSections(BIN *elf, Functions &funcs,
         ADDR *fnptr = (ADDR *)(elf->getELFFile()->base() + s.second.foff);
 #endif
         for (size_t f = 0; f < s.second.size / sizeof(ADDR); f++) {
-          if (fnptr[f] != -1 && fnptr[f]) {
+          if (fnptr[f] != (ADDR)-1 && fnptr[f]) {
             char fname[32];
             ADDR start = fnptr[f];
             if (elf->getArch() == Triple::arm ||
@@ -456,7 +456,7 @@ static void initELFFnSections(BIN *elf, Functions &funcs,
             }
             auto &newfunc =
                 funcs.insert(std::make_pair(start, Function())).first->second;
-            sprintf(fname, "%s_%ld", s.second.name.data(), f);
+            snprintf(fname, sizeof(fname), "%s_%ld", s.second.name.data(), f);
             newfunc.start = fnptr[f];
             newfunc.name = fname;
           }
@@ -599,7 +599,7 @@ Function *ELFBinary::getOrInsertFunction(addr_t addr, const char *name,
       found->second.name = name;
     } else {
       char tmpname[32];
-      sprintf(tmpname, AETHER_ANOYPREFIX "%lx", start);
+      snprintf(tmpname, sizeof(tmpname), AETHER_ANOYPREFIX "%lx", start);
       found->second.name = tmpname;
     }
   } else {
@@ -704,12 +704,12 @@ void ELFBinary::analyzePrograms(const ELFOBJ *elfobj, const ELFFILE *elffile) {
                                        addr2foff(initarr->d_un.d_ptr));
     if (!valid)
       return;
-    for (int i = 0; i < initarrsz->d_un.d_val / sizeof(addrptr[0]); i++) {
-      if (addrptr[i] == -1 || addrptr[i] == 0) {
+    for (size_t i = 0; i < initarrsz->d_un.d_val / sizeof(addrptr[0]); i++) {
+      if (addrptr[i] == (typename ELFFILE::Elf_Addr) - 1 || addrptr[i] == 0) {
         continue;
       }
       char name[32];
-      sprintf(name, "DT_InitArray_%d", i);
+      snprintf(name, sizeof(name), "DT_InitArray_%d", (unsigned)i);
       getOrInsertFunction(addrptr[i], name, &exist, &sect);
       if (!sect) {
         oosaddrs.insert(addrptr[i]);
@@ -722,12 +722,12 @@ void ELFBinary::analyzePrograms(const ELFOBJ *elfobj, const ELFFILE *elffile) {
                                        addr2foff(finiarr->d_un.d_ptr));
     if (!valid)
       return;
-    for (int i = 0; i < finiarrsz->d_un.d_val / sizeof(addrptr[0]); i++) {
-      if (addrptr[i] == -1 || addrptr[i] == 0) {
+    for (size_t i = 0; i < finiarrsz->d_un.d_val / sizeof(addrptr[0]); i++) {
+      if (addrptr[i] == (typename ELFFILE::Elf_Addr) - 1 || addrptr[i] == 0) {
         continue;
       }
       char name[32];
-      sprintf(name, "DT_FiniArray_%d", i);
+      snprintf(name, sizeof(name), "DT_FiniArray_%d", (unsigned)i);
       getOrInsertFunction(addrptr[i], name, &exist, &sect);
       if (!sect) {
         oosaddrs.insert(addrptr[i]);
@@ -747,7 +747,7 @@ void ELFBinary::analyzePrograms(const ELFOBJ *elfobj, const ELFFILE *elffile) {
                                      addr2foff(hash->d_un.d_ptr));
   if (!valid)
     return;
-  for (int i = 0; i < hashs->nchain; i++) {
+  for (size_t i = 0; i < hashs->nchain; i++) {
     if (syms[i].isUndefined()) {
       continue;
     }
@@ -782,7 +782,7 @@ void ELFBinary::analyzePrograms(const ELFOBJ *elfobj, const ELFFILE *elffile) {
     auto sit = m_sects.insert({ph->p_vaddr, Section()}).first;
     auto sptr = &sit->second;
     char tmpname[32];
-    sprintf(tmpname, "LOAD_%x", (int)ph->p_vaddr);
+    snprintf(tmpname, sizeof(tmpname), "LOAD_%x", (int)ph->p_vaddr);
     sptr->addr = ph->p_vaddr;
     sptr->foff = ph->p_offset;
     sptr->size = ph->p_filesz;
@@ -977,7 +977,7 @@ bool ELFBinary::analyze(const void *llvmbin) {
     log_newfunc(&newfunc);
   }
   // traval got
-  const mana::Section *secttext = nullptr, *gotsect = nullptr;
+  const Section *secttext = nullptr, *gotsect = nullptr;
   for (auto &s : sections()) {
     if (s.second.name == ".text") {
       secttext = &s.second;

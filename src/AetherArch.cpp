@@ -4,6 +4,11 @@
 // See LICENSE file in the root directory for full license text.
 
 #include "AetherArch.h"
+#include "AetherBinary.h"
+#include "AetherBinaryPriv.hpp"
+#include "Disassembler.h"
+
+using namespace llvm;
 
 namespace aether {
 
@@ -525,7 +530,7 @@ void Machine::analyzeFunc(Disassembler *diser, bool isobj, const char *opbuff,
               for (auto ptr = tblbuf; ptr < tblbuf + tblsize; ptr += 4) {
                 auto jmpaddr = (int64_t)target + *(int32_t *)ptr;
                 a64br.insert(jmpaddr);
-                if (maxjmp < jmpaddr)
+                if (maxjmp < (addr_t)jmpaddr)
                   maxjmp = jmpaddr;
               }
             }
@@ -1440,7 +1445,11 @@ InsnType MachineARM::insnType(void *llvminst, OpcodeInfo *opinfo) {
     }
     return NORMAL;
   case ARM::TRAP:
+#if LLVM_VERSION_MAJOR >= 22
+  case ARM::tTRAP:
+#else
   case ARM::TRAPNaCl:
+#endif
   case ARM::BKPT:
   case ARM::tBKPT:
     return TRAP;

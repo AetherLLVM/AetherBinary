@@ -4,7 +4,8 @@
 // See LICENSE file in the root directory for full license text.
 
 #include "AetherCommop.h"
-#include "AetherArch.h"
+#include "AetherBinary.h"
+#include "AetherBinaryPriv.hpp"
 
 namespace aether {
 

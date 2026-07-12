@@ -5,6 +5,10 @@
 
 #pragma once
 
+#include "AetherMeta.h"
+
+#include <string.h>
+
 namespace aether {
 
 class Disassembler;
