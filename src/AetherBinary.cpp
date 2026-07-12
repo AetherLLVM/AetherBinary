@@ -1,0 +1,2640 @@
+// AetherBinary - A library for MachO/ELF/PE analysis.
+// Copyright (c) 2026 Jesse Liu <neoliu2011@gmail.com>
+// SPDX-License-Identifier: AGPL-3.0-or-later */
+// See LICENSE file in the root directory for full license text.
+
+#include "AetherBinary.h"
+#include <Version.h>
+
+#include <llvm/BinaryFormat/COFF.h>
+#include <llvm/BinaryFormat/MachO.h>
+#include <llvm/BinaryFormat/Magic.h>
+#include <llvm/Object/COFF.h>
+#include <llvm/Object/ELFObjectFile.h>
+#include <llvm/Object/MachO.h>
+#include <llvm/Object/MachOUniversal.h>
+#if __APPLE__
+#include <llvm/Support/Compression.h>
+#if LLVM_VERSION_MAJOR >= 17
+namespace llvm {
+namespace compression {
+namespace zlib {
+Error compress(StringRef Input, SmallVectorImpl<uint8_t> &CompressedBuffer,
+               int Level = DefaultCompression) {
+  compress(ArrayRef<uint8_t>((uint8_t *)Input.data(), Input.size()),
+           CompressedBuffer);
+  return Error::success();
+}
+
+Error uncompress(StringRef Input, char *Output, size_t &UncompressedSize) {
+  return decompress(ArrayRef<uint8_t>((uint8_t *)Input.data(), Input.size()),
+                    (uint8_t *)Output, UncompressedSize);
+}
+
+Error uncompress(StringRef Input, SmallVectorImpl<uint8_t> &Output,
+                 size_t UncompressedSize) {
+  return decompress(ArrayRef<uint8_t>((uint8_t *)Input.data(), Input.size()),
+                    Output, UncompressedSize);
+}
+} // namespace zlib
+} // namespace compression
+} // namespace llvm
+using namespace llvm::compression;
+#endif // end of LLVM_VERSION_MAJOR
+#else
+#include <zlib.h>
+#endif
+#include <llvm/Support/MemoryBuffer.h>
+
+#include <iostream>
+
+#include "AetherBinaryPriv.hpp"
+#include "AetherFile.h"
+#include "Disassembler.h"
+
+using namespace llvm;
+
+#if LLVM_VERSION_MAJOR >= 17
+#define llvm_zbuff_t uint8_t
+#else
+#define llvm_zbuff_t char
+#endif
+
+namespace aether {
+
+static int printf_nop(const char *, ...) { return 0; }
+
+analyze_log_t Binary::analyze_log = printf_nop;
+
+analyze_progress_t Binary::analyze_progress = [](const char *prefix, int cur,
+                                                 int max, int &tmp) {
+  if (max < 0) {
+    analyze_log("%s\n", prefix);
+  } else {
+    int prog = cur * 100 / max;
+    if (prog == tmp) {
+      return;
+    }
+    if (prog % 10) {
+      return;
+    }
+    tmp = prog;
+
+    analyze_log("%s (%d%%)...\n", prefix, prog);
+  }
+};
+
+static inline bool undefSymbol(object::SymbolRef sym) {
+#if LLVM_VERSION_MAJOR >= 11
+  auto flagExp = sym.getFlags();
+  if (!flagExp) {
+    return false;
+  }
+  auto symflags = flagExp.get();
+#else
+  auto symflags = sym.getFlags();
+#endif
+  if ((symflags & object::BasicSymbolRef::SF_Undefined) ||
+      (symflags & object::BasicSymbolRef::SF_Common) ||
+      (symflags & object::BasicSymbolRef::SF_Indirect)) {
+    return true;
+  }
+  return false;
+}
+
+Binary::Binary() {
+  m_diser = nullptr;
+  m_diserthumb = nullptr;
+  m_filebuff = nullptr;
+  m_fileoff = 0;
+  m_filehash = 0;
+  m_llvmbin = nullptr;
+  m_archtype = UnsupportArch;
+  m_filetype = UnsupportFile;
+  m_baseaddr = INVALID_ADDR;
+}
+
+Binary::~Binary() {
+  if (m_diser) {
+    delete m_diser;
+    m_diser = nullptr;
+  }
+  if (m_diserthumb) {
+    delete m_diserthumb;
+    m_diserthumb = nullptr;
+  }
+  if (m_filebuff) {
+    delete (MemoryBuffer *)m_filebuff;
+    m_filebuff = nullptr;
+  }
+}
+
+bool Binary::valid() const {
+  if (m_archtype == ARM) {
+    if (m_diserthumb == nullptr || !m_diserthumb->ready()) {
+      return false;
+    }
+  }
+  return m_diser && m_diser->ready() && m_archtype != UnsupportArch &&
+         m_filetype != UnsupportFile;
+}
+
+const Function *Binary::addrFunc(addr_t addr, bool eq) const {
+  if (eq) {
+    auto found = m_funcs.find(addr);
+    return found == m_funcs.end() ? nullptr : &found->second;
+  }
+  for (auto &f : m_funcs) {
+    const Function *fn = &f.second;
+    if (f.first <= addr && addr < fn->end) {
+      return fn;
+    }
+  }
+  return nullptr;
+}
+
+const Section *Binary::addrSect(addr_t addr) const {
+  for (auto &s : m_sects) {
+    const Section *sect = &s.second;
+    if (sect->addr <= addr && addr < sect->addr + sect->size) {
+      return sect;
+    }
+  }
+  return nullptr;
+}
+
+const Section *Binary::nameSect(const char *name) const {
+  for (auto &s : m_sects) {
+    const Section *sect = &s.second;
+    if (strcmp(sect->name.data(), name) == 0) {
+      return sect;
+    }
+  }
+  return nullptr;
+}
+
+const char *Binary::addrBuff(addr_t addr) const {
+  size_t bufsz;
+  const Section *sect = addrSect(addr);
+  const char *buf = fileBuffer(bufsz);
+  if (sect && sect->foff < bufsz) {
+    return buf + sect->foff + addr - sect->addr;
+  }
+  return buf + addr - imageBase();
+}
+
+bool Binary::isCode(addr_t addr) const {
+  auto sect = addrSect(addr);
+  return sect && sect->foff && sect->type == TEXT;
+}
+
+bool Binary::isTextCode(addr_t addr) const {
+  auto sect = addrSect(addr);
+  if (!(sect && sect->type == TEXT)) {
+    return false;
+  }
+  if (strstr(sect->name.data(), "text")) {
+    return true;
+  }
+  if (strstr(sect->name.data(), "stub")) {
+    return false;
+  }
+  if (strstr(sect->name.data(), "plt")) {
+    return false;
+  }
+  return true;
+}
+
+bool Binary::load(const char *dbpath) { abort(); }
+
+size_t Binary::stringSize() {
+  size_t strsize = 0;
+  for (auto &s : m_sects) {
+    strsize += s.second.name.size() + 1;
+  }
+  for (auto &f : m_funcs) {
+    strsize += f.second.name.size() + 1;
+  }
+  return strsize;
+}
+
+size_t Binary::insnSize() {
+  size_t insnsize = 0;
+  for (auto &f : m_funcs) {
+    insnsize += f.second.insns.size() * sizeof(ManaInsn);
+  }
+  return insnsize;
+}
+
+template <typename T> static void saveLoops(Loops &loops, FILE *fp) {
+  std::vector<T> loopv;
+  for (auto &l : loops) {
+    loopv.push_back((T)l.first);
+    loopv.push_back((T)l.second);
+  }
+  if (loopv.size()) {
+    fwrite(&loopv[0], 1, sizeof(T) * loopv.size(), fp);
+  }
+}
+
+template <typename T> static void saveIndexs(const Function &func, FILE *fp) {
+  auto &insns = func.insns;
+  std::vector<T> idxv;
+  for (auto &I : insns) {
+#if 0
+    addr_t insnaddr = func.start + I.fnoff;
+    if (insnaddr == 0 || insnaddr == 0) {
+      puts("debug me.");
+    }
+#endif
+    for (auto &o : I.gouts) {
+      idxv.push_back((T)o);
+    }
+    for (auto &i : I.comins) {
+      idxv.push_back((T)i);
+    }
+  }
+  if (idxv.size()) {
+    fwrite(&idxv[0], 1, sizeof(T) * idxv.size(), fp);
+  }
+}
+
+void compressDBFile(const char *dbpath) {
+  int tmp;
+  Binary::analyze_progress(AETHER_LIB_NAME
+                           " is compressing the raw database file...\n",
+                           -1, -1, tmp);
+  auto errOrBuff = MemoryBuffer::getFile(dbpath, -1, false);
+  if (!errOrBuff) {
+    return;
+  }
+  auto buff = errOrBuff->get();
+#if __APPLE__
+  SmallVector<llvm_zbuff_t, 102400> zipbuff;
+  Error err =
+      zlib::compress(buff->getBuffer(), zipbuff, zlib::BestSizeCompression);
+  if (err) {
+    return;
+  }
+  size_t dstsize = zipbuff.size();
+#else
+  uLong dstsize = compressBound(buff->getBufferSize());
+  SmallVector<char, 1024> zipbuff;
+  zipbuff.resize(dstsize);
+  compress2((Bytef *)zipbuff.data(), &dstsize, (Bytef *)buff->getBufferStart(),
+            buff->getBufferSize(), Z_BEST_COMPRESSION);
+#endif
+
+  size_t rawlen = buff->getBufferSize();
+  // delete buff to close the buffer file
+  delete errOrBuff->release();
+
+  FILE *fp = fopen(dbpath, "wb");
+  if (!fp) {
+    char errbuff[4096];
+    sprintf(errbuff, AETHER_LIB_NAME " failed to create compress db file %s.\n",
+            dbpath);
+    Binary::analyze_progress(errbuff, -1, -1, tmp);
+    return;
+  }
+  fwrite(zipbuff.data(), 1, dstsize, fp);
+  fwrite(&rawlen, 1, 4, fp);
+  fclose(fp);
+}
+
+AebiFile *uncompressDBFile(const char *dbpath) {
+  auto errOrBuff = MemoryBuffer::getFile(dbpath, -1, false);
+  if (!errOrBuff) {
+    return nullptr;
+  }
+  auto buff = errOrBuff->get();
+  size_t uncompsz =
+      *(int *)(buff->getBufferStart() + buff->getBufferSize() - 4);
+  char *dbbuff = (char *)malloc(uncompsz);
+#if __APPLE__
+  Error err = zlib::uncompress(buff->getBuffer(), dbbuff, uncompsz);
+  if (err) {
+    free(dbbuff);
+    return nullptr;
+  }
+#else
+  uncompress((Bytef *)dbbuff, (uLongf *)&uncompsz,
+             (Bytef *)buff->getBufferStart(), buff->getBufferSize());
+#endif
+  return (AebiFile *)dbbuff;
+}
+
+bool compressBuffer(const char *buff, int size, std::string *out) {
+#if __APPLE__
+  SmallVector<llvm_zbuff_t, 102400> zipbuff;
+  Error err =
+      zlib::compress(StringRef(buff, size), zipbuff, zlib::BestSizeCompression);
+  if (err) {
+    return false;
+  }
+  size_t dstsize = zipbuff.size();
+#else
+  uLong dstsize = compressBound(size);
+  SmallVector<char, 1024> zipbuff;
+  zipbuff.resize(dstsize);
+  if (compress2((Bytef *)zipbuff.data(), &dstsize, (Bytef *)buff, size,
+                Z_BEST_COMPRESSION) != Z_OK) {
+    return false;
+  }
+#endif
+
+  out->resize(dstsize);
+  memcpy((char *)out->data(), zipbuff.data(), dstsize);
+  return true;
+}
+
+bool uncompressBuffer(const char *buff, int size, int realsize,
+                      std::string *out) {
+  size_t uncompsz = realsize;
+  out->resize(realsize);
+  char *dbbuff = (char *)out->data();
+#if __APPLE__
+  Error err = zlib::uncompress(StringRef(buff, size), dbbuff, uncompsz);
+  if (err) {
+    out->clear();
+    return false;
+  }
+  return true;
+#else
+  return uncompress((Bytef *)dbbuff, (uLongf *)&uncompsz, (Bytef *)buff,
+                    size) == Z_OK;
+#endif
+}
+
+bool Binary::save(const char *dbpath, bool compress) {
+  int tmp;
+  analyze_progress(AETHER_LIB_NAME " is generating the raw database file...\n",
+                   -1, -1, tmp);
+  FILE *fp = fopen(dbpath, "wb");
+  if (fp == nullptr) {
+    return false;
+  }
+  size_t strsize = stringSize();
+  size_t strpad = 4 - strsize % 4;
+  AebiFile manafhdr;
+  manafhdr.baseaddr = m_baseaddr;
+  manafhdr.filehash = m_filehash;
+  manafhdr.info.arch = m_archtype;
+  manafhdr.info.filetype = m_filetype;
+  manafhdr.info.nsect = (ubit8)m_sects.size();
+  manafhdr.info.reserved = 0;
+  manafhdr.magic = AETHER_FILE_ANA;
+  manafhdr.nfunc = (ubit32)m_funcs.size();
+  manafhdr.version = AETHER_FILE_VERSION;
+  manafhdr.stroff = sizeof(manafhdr) + sizeof(ManaSect) * manafhdr.info.nsect;
+  manafhdr.funcoff = manafhdr.stroff + (ubit32)(strsize + strpad);
+  // header
+  fwrite(&manafhdr, 1, sizeof(manafhdr), fp);
+  ubit32 stroff = 0;
+  // section
+  for (auto &s : m_sects) {
+    ManaSect ms;
+    ms.addr = s.second.addr;
+    ms.fileoff = (ubit32)s.second.foff;
+    ms.size = (ubit32)s.second.size;
+    ms.info.name = stroff;
+    ms.info.type = s.second.type;
+    ms.info.reserved = 0;
+    stroff += s.second.name.size() + 1;
+    fwrite(&ms, 1, sizeof(ms), fp);
+  }
+  // string
+  for (auto &s : m_sects) {
+    fwrite(s.second.name.data(), 1, s.second.name.size() + 1, fp);
+  }
+  for (auto &f : m_funcs) {
+    fwrite(f.second.name.c_str(), 1, f.second.name.size() + 1, fp);
+  }
+  fwrite("$$$$", 1, strpad, fp);
+  // function
+  ubit32 insnoff = manafhdr.funcoff + sizeof(AebiFunc) * manafhdr.nfunc;
+  ubit32 loopoff = insnoff + (ubit32)insnSize();
+  // printf("insnoff=%x loopoff=%x\n", insnoff, loopoff);
+  for (auto &f : m_funcs) {
+    AebiFunc mf;
+    mf.info.nloop = (ubit16)f.second.loops.size();
+    if (m_archtype == ARM) {
+      mf.info.thumb = (ubit8)f.second.start & 1;
+    } else {
+      mf.info.thumb = 0;
+    }
+    mf.info.flags = (ubit8)f.second.flags;
+    mf.insnoff = insnoff;
+    mf.loopoff = loopoff;
+    mf.name = stroff;
+    mf.ninsn = (ubit32)f.second.insns.size();
+    if (m_archtype == ARM) {
+      mf.rvastart = (ubit32)((f.second.start & ~1) - m_baseaddr);
+    } else {
+      mf.rvastart = (ubit32)(f.second.start - m_baseaddr);
+    }
+    mf.rvaend = (ubit32)(f.second.end - m_baseaddr);
+    stroff += f.second.name.size() + 1;
+    insnoff += sizeof(ManaInsn) * mf.ninsn;
+    loopoff += mf.sizeofIndex() * 2 * mf.info.nloop;
+    fwrite(&mf, 1, sizeof(mf), fp);
+  }
+  // instruction
+  ubit32 goutoff = loopoff;
+  // printf("goutoff=%x, mi_ftell=%lx\n", goutoff, ftell(fp));
+  for (auto &f : m_funcs) {
+    AebiFunc mf;
+    mf.ninsn = (ubit32)f.second.insns.size();
+    for (auto &i : f.second.insns) {
+      ManaInsn mi;
+      mi.fnoff = (ubit32)i.fnoff;
+      mi.gooff = goutoff;
+      mi.ncomin = (ubit32)i.comins.size();
+      mi.ngout = (ubit32)i.gouts.size();
+      mi.oplen = i.info.oplen - 1;
+      mi.type = i.info.type;
+      goutoff += mf.sizeofIndex() * (mi.ncomin + mi.ngout);
+      fwrite(&mi, 1, sizeof(mi), fp);
+    }
+  }
+  // loop
+  // printf("loop_ftell=%lx\n", ftell(fp));
+  for (auto &f : m_funcs) {
+    AebiFunc mf;
+    mf.ninsn = (ubit32)f.second.insns.size();
+    switch (mf.sizeofIndex()) {
+    case 1: {
+      saveLoops<ubit8>(f.second.loops, fp);
+      break;
+    }
+    case 2: {
+      saveLoops<ubit16>(f.second.loops, fp);
+      break;
+    }
+    default: {
+      saveLoops<ubit32>(f.second.loops, fp);
+      break;
+    }
+    }
+  }
+  // index
+  // printf("index_ftell=%lx\n", ftell(fp));
+  for (auto &f : m_funcs) {
+    AebiFunc mf;
+    mf.ninsn = (ubit32)f.second.insns.size();
+    switch (mf.sizeofIndex()) {
+    case 1: {
+      saveIndexs<ubit8>(f.second, fp);
+      break;
+    }
+    case 2: {
+      saveIndexs<ubit16>(f.second, fp);
+      break;
+    }
+    default: {
+      saveIndexs<ubit32>(f.second, fp);
+      break;
+    }
+    }
+  }
+  fclose(fp);
+
+  if (compress) {
+    compressDBFile(dbpath);
+  }
+  return true;
+}
+
+void Binary::funcAnalyze(Disassembler *diser, const char *fnbuff,
+                         Function &func) {
+  const char *fnbuffend = fnbuff + func.end - func.start;
+  switch (archType()) {
+  case ARMV5TE:
+  case ARM: {
+    MachineARM tmp;
+    bool thumb = func.start & 1;
+    if (thumb) {
+      fnbuff += 1; // analyzeFunc will -1
+      fnbuffend += 1;
+    }
+    tmp.analyzeFunc(diser, m_llvmbin->isObject(), fnbuff, fnbuffend, func,
+                    nullptr, this, thumb);
+    break;
+  }
+  case ARM64: {
+    MachineARM64 tmp;
+    tmp.analyzeFunc(diser, m_llvmbin->isObject(), fnbuff, fnbuffend, func,
+                    nullptr, this);
+    break;
+  }
+  case X86:
+  case X86_64: {
+    MachineX86 tmp;
+    tmp.analyzeFunc(diser, m_llvmbin->isObject(), fnbuff, fnbuffend, func,
+                    nullptr, this);
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+FormatType Binary::formatType() const {
+  size_t filesz;
+  auto filebuff = fileBuffer(filesz);
+  file_magic magic = identify_magic(StringRef(filebuff, filesz));
+  switch (magic) {
+  case file_magic::macho_object:
+  case file_magic::coff_object:
+  case file_magic::elf_relocatable:
+    return Object;
+  case file_magic::macho_executable:
+  case file_magic::macho_preload_executable:
+  case file_magic::macho_dynamic_linker:
+  case file_magic::pecoff_executable:
+  case file_magic::elf_executable:
+    return Executable;
+  case file_magic::macho_dynamically_linked_shared_lib:
+  case file_magic::macho_bundle:
+  case file_magic::macho_kext_bundle:
+  case file_magic::macho_dynamically_linked_shared_lib_stub:
+  case file_magic::coff_import_library:
+  case file_magic::elf_shared_object:
+    return Library;
+  default:
+    return Raw;
+  }
+}
+
+const char *Binary::fileTypeString() const {
+  switch (m_filetype) {
+  case MachO:
+    return "MachO";
+  case ELF:
+    return "ELF";
+  case PE:
+    return "PE";
+  default:
+    return "???";
+  }
+}
+
+const char *Binary::archTypeString() const {
+  switch (m_archtype) {
+  case ARMV5TE:
+    return "ARMV5TE";
+  case ARM:
+    return "ARM";
+  case ARM64:
+    return "ARM64";
+  case X86:
+    return "X86";
+  case X86_64:
+    return "X86_64";
+  default:
+    return "???";
+  }
+}
+
+void Binary::dump() {
+  printf("file type : %d\n"
+         "arch type : %d\n"
+         "base addr : " ADDRFMT "\n"
+         "sections : {\n",
+         m_filetype, m_archtype, m_baseaddr);
+  for (auto &it : m_sects) {
+    Section &sect = it.second;
+    printf("\t%s = {\n"
+           "\t\ttype : %d\n"
+           "\t\taddr : " ADDRFMT "\n"
+           "\t\tfoff : " ADDRFMT "\n"
+           "\t\tsize : " ADDRFMT "\n"
+           "\t}\n",
+           sect.name.data(), sect.type, sect.addr, sect.foff, sect.size);
+  }
+  printf("}\nfunctions[%ld] : {\n", m_funcs.size());
+  for (auto &it : m_funcs) {
+    Function &func = it.second;
+    printf("\t%s = {\n"
+           "\t\tstart : " ADDRFMT "\n"
+           "\t\tend   : " ADDRFMT "\n"
+           "\t\tinsns[%ld] : {\n",
+           func.name.c_str(), func.start, func.end, func.insns.size());
+    for (size_t i = 0; i < func.insns.size(); i++) {
+      if (i > 3) {
+        printf("\t\t\t....\n");
+        break;
+      }
+
+      auto I = func.insns[i];
+      printf("\t\t\tI%ld_%x = { %d, %d, O[", i, I.fnoff, I.info.type,
+             I.info.oplen);
+      for (auto o : I.gouts) {
+        printf("%d ", o);
+      }
+      printf("], I[");
+      for (auto c : I.comins) {
+        printf("%d ", c);
+      }
+      printf("] }\n");
+    }
+    printf("\t\t}\n\t\tloops[%ld] : {\n", func.loops.size());
+    for (auto &l : func.loops) {
+      printf("\t\t\t%d ==> %d\n", l.first, l.second);
+      // break;
+    }
+    printf("\t\t}\n\t}\n");
+  }
+  printf("}\n");
+}
+
+const char *Binary::arch(bool thumb) const {
+  switch (m_archtype) {
+  case ARM64:
+    return "aarch64";
+  case X86_64:
+    return "x86-64";
+  case X86:
+    return "x86";
+  case ARM:
+  case ARMV5TE:
+    return thumb ? "thumb" : "arm";
+  default:
+    return nullptr;
+  }
+}
+
+const char *Binary::triple(bool thumb) const {
+  switch (m_filetype) {
+  case ELF:
+    switch (m_archtype) {
+    case ARM64:
+      return "aarch64-none-linux-android";
+    case X86_64:
+      return "x86_64-none-linux-android";
+    case X86:
+      return "x86-none-linux-android";
+    case ARM:
+      return thumb ? "thumbv7-none-linux-androideabi"
+                   : "armv7-none-linux-androideabi";
+    case ARMV5TE:
+      return thumb ? "thumbv5te-none-linux-androideabi"
+                   : "armv5te-none-linux-androideabi";
+    default:
+      return nullptr;
+    }
+  case MachO:
+    switch (m_archtype) {
+    case ARM64:
+      return isArm64e() ? "arm64e-apple-ios" : "arm64-apple-ios";
+    case ARM:
+      return thumb ? "thumbv7-apple-ios" : "armv7-apple-ios";
+    case X86_64:
+      return "x86_64-apple-macosx";
+    case X86:
+      return "i386-apple-macosx";
+    default:
+      return nullptr;
+    }
+  case PE:
+    switch (m_archtype) {
+    case X86:
+      return "x86-pc-windows-msvc";
+    case X86_64:
+      return "x86_64-pc-windows-msvc";
+    case ARM64:
+      return "aarch64-pc-windows-msvc";
+    default:
+      return nullptr;
+    }
+  default:
+    return nullptr;
+  }
+}
+
+bool Binary::init() {
+  const char *tripname = triple(false);
+  if (!tripname) {
+    return false;
+  }
+  m_diser = new Disassembler(arch(false));
+  if (!m_diser->ready()) {
+    delete m_diser;
+    m_diser = nullptr;
+    return false;
+  }
+
+  const char *tripthumb = triple(true);
+  if (tripname == tripthumb || strcmp(tripname, tripthumb) == 0) {
+    return true;
+  }
+
+  m_diserthumb = new Disassembler(arch(true));
+  if (m_diserthumb->ready()) {
+    return true;
+  }
+
+  delete m_diser;
+  delete m_diserthumb;
+  m_diser = nullptr;
+  m_diserthumb = nullptr;
+  return false;
+}
+
+void log_newfunc(Function *fn) {
+#if 0
+  if (fn->start == 0) {
+    puts("debug me.");
+  }
+#endif
+}
+
+void Binary::interateSymbols(void (*callback)(void *ctx, const char *name,
+                                              addr_t addr),
+                             void *ctx) {
+  const void *llvmbin = m_llvmbin;
+  for (auto sym : objbase->symbols()) {
+    auto erraddr = sym.getAddress();
+    auto errname = sym.getName();
+    if (!erraddr || !errname) {
+      continue;
+    }
+    callback(ctx, errname.get().data(), erraddr.get());
+  }
+}
+
+void Binary::parseSymtab(const void *llvmbin, bool dwarf) {
+  std::vector<const Section *> sects; // use to relocate symbol address
+  if (objbase->isCOFF()) {
+    for (auto &s : sections()) {
+      sects.push_back(&s.second);
+    }
+  }
+  for (auto sym : objbase->symbols()) {
+    auto expType = sym.getType();
+    if (!expType) {
+      continue;
+    }
+    if (expType.get() != object::SymbolRef::ST_Function) {
+      continue;
+    }
+    if (undefSymbol(sym)) {
+      continue;
+    }
+#if LLVM_VERSION_MAJOR >= 11
+    auto flagExp = sym.getFlags();
+    if (!flagExp) {
+      continue;
+    }
+    auto flags = flagExp.get();
+#else
+    auto flags = sym.getFlags();
+#endif
+    if (flags & object::BasicSymbolRef::SF_FormatSpecific) {
+      continue;
+    }
+
+    auto erraddr = sym.getAddress();
+    if (!erraddr) {
+      continue;
+    }
+    auto addr = erraddr.get();
+    // convert sect-rva to coff file-rva
+    if (objbase->isCOFF()) {
+      auto sectExp = sym.getSection();
+      if (!sectExp) {
+        continue;
+      }
+      auto sidx = sectExp.get()->getIndex();
+      if (sidx < sects.size()) {
+        addr += sects[sidx]->addr;
+      } else {
+        // currently haven't reset coff's address of section
+        return;
+      }
+    } else if (!isCode(addr)) {
+      continue;
+    }
+
+    auto start = addr;
+    if (flags & object::BasicSymbolRef::SF_Thumb) {
+      addr |= 1;
+      start &= ~1;
+    }
+    auto found = m_funcs.find(start);
+    if (found != m_funcs.end()) {
+      auto errname = sym.getName();
+      if (errname && errname.get().size()) {
+        if (found->second.name[0] == 'l' || dwarf) {
+          found->second.name = errname.get().data();
+        }
+      }
+      continue;
+    }
+    auto &newfunc =
+        m_funcs.insert(std::make_pair(start, Function())).first->second;
+    newfunc.start = addr;
+    if (flags & object::BasicSymbolRef::SF_Exported) {
+      newfunc.flags |= MFF_EXPORT;
+    }
+    auto errname = sym.getName();
+    if (errname && errname.get().size()) {
+      newfunc.name = errname.get().data();
+    } else {
+      strfmt(newfunc.name, AETHER_ANOYPREFIX "" ADDRFMT "", start);
+    }
+    log_newfunc(&newfunc);
+  }
+}
+
+const char *Binary::filePath() const {
+  if (!m_llvmbin) {
+    return ((MemoryBuffer *)m_filebuff)->getBufferIdentifier().data();
+  }
+  return m_llvmbin->getMemoryBufferRef().getBufferIdentifier().data();
+}
+
+const char *Binary::fileBuffer(size_t &size) const {
+  StringRef buff;
+  if (!m_llvmbin) {
+    buff = ((MemoryBuffer *)m_filebuff)->getBuffer();
+  } else {
+    // it's the right buffer range, no need add m_fileoff for fat file
+    buff = m_llvmbin->getMemoryBufferRef().getBuffer();
+  }
+  size = buff.size();
+  return buff.data();
+}
+
+std::vector<const char *> Binary::importLibs() const {
+  switch (fileType()) {
+  case FileType::MachO:
+    return importMachOLibs();
+  case FileType::ELF:
+    return importELFLibs();
+  case FileType::PE:
+    return importPELibs();
+  default:
+    return std::vector<const char *>();
+  }
+}
+
+void Binary::holdBuffer(void *llvmbin, void *filebuff) {
+  m_llvmbin = (llvm::object::Binary *)llvmbin;
+  m_filebuff = (llvm::MemoryBuffer *)filebuff;
+
+  init();
+  if (llvmbin) {
+    initBaseAddr(llvmbin);
+  }
+}
+
+bool Binary::analyze(const void *llvmbin) {
+  auto mbr = objbase->getMemoryBufferRef();
+  size_t bufsz;
+  const char *bufstart = fileBuffer(bufsz);
+  m_filehash = (ubit32)hash_value(mbr.getBuffer());
+
+  initBaseAddr(llvmbin);
+
+  // traval section
+  for (auto sect : objbase->sections()) {
+    if (!sect.getSize()) {
+      continue;
+    }
+    StringRef buff, name;
+#if LLVM_VERSION_MAJOR >= 11
+    auto expBuff = sect.getContents();
+    auto expName = sect.getName();
+    if (expBuff && expName) {
+      buff = expBuff.get();
+      name = expName.get();
+    } else {
+      continue;
+    }
+#else
+    sect.getContents(buff);
+    sect.getName(name);
+#endif
+    if (!name.data()) {
+      // the file maybe encryted
+      continue;
+    }
+    uint64_t addr = sect.getAddress();
+    if (!addr) {
+      if (!objbase->isRelocatableObject()) {
+        if (strstr(name.data(), "debug")) {
+          // ignore debug section
+          continue;
+        }
+        // indicate fake address
+        addr = (buff.data() - bufstart) | 0x1000000000000000ll;
+      }
+    }
+
+    auto &newsect =
+        m_sects.insert(std::make_pair(addr, Section())).first->second;
+    newsect.addr = addr;
+    if (buff.size()) {
+      newsect.foff = buff.data() - bufstart;
+    } else {
+      newsect.foff = addr - imageBase();
+    }
+    if (newsect.foff > bufsz) {
+      // ignore the invalid section
+      m_sects.erase(m_sects.find(addr));
+      continue;
+    }
+    newsect.size = sect.getSize();
+    if (sect.isText()) {
+      newsect.type = TEXT;
+    } else {
+      newsect.type = DATA;
+    }
+    newsect.name = name.data();
+
+    m_sectbuffs.insert(std::make_pair(addr, buff.data()));
+  }
+
+  // now we'll parse DT_LOAD segment...
+  if (0 && !m_sects.size()) {
+    const char *filename = filePath();
+    const char *ptr = strrchr(filename, '/');
+    if (!ptr) {
+      ptr = strrchr(filename, '\\');
+    }
+    if (ptr) {
+      filename = ptr + 1;
+    }
+    analyze_log(AETHER_LIB_NAME
+                ": %s has no section, create a file section instead.\n",
+                filename);
+    auto &newsect =
+        m_sects.insert(std::make_pair(imageBase(), Section())).first->second;
+    newsect.addr = imageBase();
+    newsect.foff = 0;
+    newsect.size = bufsz;
+    newsect.type = DATA;
+    newsect.name = filename;
+    m_sectbuffs.insert(std::make_pair(imageBase(), bufstart));
+
+    m_funcs.clear();
+    auto &newfunc =
+        m_funcs.insert(std::make_pair(imageBase(), Function())).first->second;
+    newfunc.start = imageBase();
+    newfunc.end = bufsz;
+    newfunc.name = filename;
+    newfunc.flags = 0;
+    newfunc.difs.insert(newfunc.start);
+    for (int i = 0; i < bufsz / 4; i += 4) {
+      newfunc.insns.push_back(Insinfo());
+      auto newii = newfunc.insns.rbegin();
+      newii->fnoff = i;
+      newii->info.type = InsnType::IDATA;
+      newii->info.oplen = 4;
+    }
+    return false;
+  }
+
+  initImports(llvmbin);
+  parseSymtab(llvmbin);
+  return true;
+}
+
+void Binary::mergeFunc(std::set<addr_t> &newfns) {
+  if (hasFuncStarts())
+    newfns.clear();
+
+  for (auto addr : newfns) {
+    if (m_funcs.find(addr) != m_funcs.end() ||
+        m_funcs.find(addr | 1) != m_funcs.end() ||
+        m_funcs.find(addr & ~1) != m_funcs.end()) {
+      continue;
+    }
+    auto sect = addrSect(addr);
+    if (!(sect && sect->type == TEXT)) {
+      continue;
+    }
+    auto start = addr;
+    auto dis = diser();
+    if (archType() == ARM) {
+      if (start & 1) {
+        start &= ~1;
+        dis = diserThumb();
+      }
+    }
+    const char *addrbuf = addrBuff(start);
+    bool breakmerge = false;
+    switch (archType()) {
+    case ARM64: {
+      // skip undef zero opcode
+      while (*(int *)addrbuf == 0) {
+        addrbuf += 4;
+        start += 4;
+        addr += 4;
+        if (addr >= sect->addr + sect->size) {
+          breakmerge = true;
+          break;
+        }
+      }
+      if (m_funcs.find(addr) != m_funcs.end()) {
+        breakmerge = true;
+      }
+      break;
+    }
+    default:
+      break;
+    }
+    if (breakmerge) {
+      continue;
+    }
+
+    MCInst inst;
+    if (!dis->disassemble((unsigned char *)addrbuf, 16, inst)) {
+      continue;
+    }
+    bool spopr;
+    switch (archType()) {
+    case ARM:
+      spopr = false;
+      for (auto o = 0; o < inst.getNumOperands(); o++) {
+        auto opr = inst.getOperand(o);
+        if (opr.isReg() && opr.getReg() == ARM::SP) {
+          spopr = true;
+          break;
+        }
+      }
+      break;
+    case ARM64:
+      // objc stubs
+      spopr = sect->name.find("stub") != std::string::npos;
+      for (auto o = 0; o < inst.getNumOperands(); o++) {
+        auto opr = inst.getOperand(o);
+        if (opr.isReg()) {
+          switch (opr.getReg()) {
+          case AArch64::SP:
+          case AArch64::FP:
+          case AArch64::LR:
+            spopr = true;
+          default:
+            break;
+          }
+          break;
+        }
+      }
+      break;
+    default:
+      spopr = false;
+#if LLVM_VERSION_MAJOR <= 17
+      if (X86::PUSH16i8 <= inst.getOpcode() && inst.getOpcode() <= X86::PUSHi32)
+#else
+      if (X86::PUSH16i <= inst.getOpcode() && inst.getOpcode() <= X86::PUSHSS32)
+#endif
+      {
+        spopr = true;
+      }
+      break;
+    }
+    // only treat it as function if first insn has sp operand
+    if (!spopr) {
+      continue;
+    }
+
+    auto &newfunc =
+        m_funcs.insert(std::make_pair(start, Function())).first->second;
+    newfunc.start = addr;
+    strfmt(newfunc.name, AETHER_ANOYPREFIX "" ADDRFMT "", start);
+    log_newfunc(&newfunc);
+  }
+  for (auto it = m_funcs.begin(), itend = m_funcs.end(); it != itend;) {
+    const Section *sect = addrSect(it->first);
+    if (sect) {
+      it++;
+    } else {
+      it = m_funcs.erase(it);
+    }
+  }
+  for (auto it = m_funcs.begin(), itend = m_funcs.end(); it != itend;) {
+    auto curit = it++;
+    auto nextit = it;
+    const Section *sect = addrSect(curit->first);
+    if (strstr(sect->name.data(), "plt") || strstr(sect->name.data(), "stub")) {
+      curit->second.flags |= MFF_IMPORT;
+    }
+    if (nextit == itend) {
+      curit->second.end = sect->addr + sect->size;
+    } else {
+      switch (archType()) {
+      case ARMV5TE:
+      case ARM: {
+        curit->second.end =
+            std::min(nextit->first & ~1, sect->addr + sect->size);
+        break;
+      }
+      default: {
+        curit->second.end = std::min(nextit->first, sect->addr + sect->size);
+        break;
+      }
+      }
+    }
+  }
+  if (archType() == ARM64) {
+    std::vector<addr_t> jmpstubs;
+    for (auto it = m_funcs.begin(), itend = m_funcs.end(); it != itend; it++) {
+      MCInst inst;
+      auto addrbuf = addrBuff(it->first);
+      auto bufend = addrbuf + it->second.end - it->first;
+      int jmpcount = 0;
+      for (auto ptr = addrbuf; ptr < bufend; ptr += 4) {
+        if (m_diser->disassemble((unsigned char *)ptr, 16, inst) != 4) {
+          break;
+        }
+        if (inst.getOpcode() == AArch64::B) {
+          jmpcount++;
+        } else {
+          break;
+        }
+      }
+      if (jmpcount > 1 && jmpcount == (bufend - addrbuf) / 4) {
+        // split to jump stubs
+        for (auto fn = it->first; fn < it->second.end; fn += 4)
+          jmpstubs.push_back(fn);
+      }
+    }
+    for (auto fn : jmpstubs) {
+      auto &newfunc =
+          m_funcs.insert(std::make_pair(fn, Function())).first->second;
+      newfunc.start = fn;
+      newfunc.end = fn + 4;
+      strfmt(newfunc.name, AETHER_ANOYPREFIX "jmp_" ADDRFMT "", fn);
+    }
+  }
+}
+
+static inline void branch_a64(int tmpopc, addr_t addr, addr_t target,
+                              char *opcode) {
+  // target = pc + 4 * imm
+  // imm = (target - pc) / 4
+  uint32_t imm = (uint32_t)((int32_t)(target - addr) / 4);
+  imm &= ~0xFC000000;
+  *(int *)opcode = tmpopc;
+  *(int *)opcode &= 0xFC000000;
+  *(int *)opcode |= imm;
+}
+
+static const int adr_lomask = 0x60000000;
+static const int adr_himask = 0x7FFFF << 5;
+static const int adr_valmask = 0x1FFFFF;
+
+static inline void adr_a64(int tmpopc, addr_t addr, addr_t target,
+                           char *opcode) {
+  // target = pc + imm
+  // imm = target - pc
+  uint32_t imm = (uint32_t)(target - addr);
+  imm &= adr_valmask;
+  uint32_t loimm = imm & 0x3;
+  uint32_t hiimm = imm >> 2;
+  *(int *)opcode = tmpopc;
+  *(int *)opcode &= ~adr_lomask;
+  *(int *)opcode &= ~adr_himask;
+  *(int *)opcode |= loimm << 29;
+  *(int *)opcode |= hiimm << 5;
+}
+
+static inline int32_t adrp_a64(int tmpopc, addr_t addr, addr_t target,
+                               char *opcode) {
+  // target = pc + imm * 0x1000
+  // imm = (target - pc) / 0x1000
+  uint32_t imm =
+      (int32_t)((target & ~(0x1000 - 1)) - (addr & ~(0x1000 - 1))) / 0x1000;
+  int32_t pageoff = imm;
+  imm &= adr_valmask;
+  uint32_t loimm = imm & 0x3;
+  uint32_t hiimm = imm >> 2;
+  *(int *)opcode = tmpopc;
+  *(int *)opcode &= ~adr_lomask;
+  *(int *)opcode &= ~adr_himask;
+  *(int *)opcode |= loimm << 29;
+  *(int *)opcode |= hiimm << 5;
+  return pageoff;
+}
+
+static inline void addi_a64(int tmpopc, uint32_t imm, char *opcode) {
+  imm &= 0xFFF;
+  *(int *)opcode = tmpopc;
+  *(int *)opcode &= ~(0xFFF << 10);
+  *(int *)opcode |= imm << 10;
+}
+
+static inline void ldstri_a64(int tmpopc, uint32_t imm, char *opcode) {
+  imm &= 0xFFF;
+  *(int *)opcode = tmpopc;
+  *(int *)opcode &= ~(0xFFF << 10);
+  *(int *)opcode |= imm << 10;
+}
+
+static inline void branch_imm14_a64(int tmpopc, addr_t addr, addr_t target,
+                                    char *opcode) {
+  // target = pc + 4 * imm
+  // imm = (target - pc) / 4
+  uint32_t imm = (uint32_t)((int32_t)(target - addr) / 4);
+  imm &= 0x3FFF;
+  *(int *)opcode = tmpopc;
+  *(int *)opcode &= ~(0x3FFF << 5);
+  *(int *)opcode |= imm << 5;
+}
+
+static inline void pcrela_imm19_a64(int tmpopc, addr_t addr, addr_t target,
+                                    char *opcode) {
+  // target = pc + 4 * imm
+  // imm = (target - pc) / 4
+  uint32_t imm = (uint32_t)((int32_t)(target - addr) / 4);
+  imm &= 0x7FFFF;
+  *(int *)opcode = tmpopc;
+  *(int *)opcode &= ~(0x7FFFF << 5);
+  *(int *)opcode |= imm << 5;
+}
+
+static const int opc_arm64_nop = 0xd503201f;
+static const int opc_arm64_b = 0x14000000;
+static const int opc_arm64_bl = 0x94000000;
+static const int opc_arm64_b_lt = 0x5400000b;
+
+static std::pair<int, int> assemble_code(Disassembler *diser,
+                                         const char *code) {
+  unsigned char opcode[20];
+  std::pair<int, int> result = {2, 0};
+  diser->assemble(code, &opcode[0]);
+  result.first = opcode[0];
+  memcpy(&result.second, &opcode[1], sizeof(result.second));
+  return result;
+}
+
+static std::pair<int, int> assemble_code(Disassembler *diser, MCInst &inst) {
+  std::string code;
+  diser->print(inst, code);
+  return assemble_code(diser, code.data());
+}
+
+#define ResetBitsDecl(fname, InsnType)                                         \
+  static InsnType fname(InsnType insn, unsigned startBit, unsigned numBits,    \
+                        InsnType bitVal) {                                     \
+    InsnType fieldMask;                                                        \
+    if (numBits == sizeof(InsnType) * 8)                                       \
+      fieldMask = (InsnType)(-1LL);                                            \
+    else                                                                       \
+      fieldMask = (((InsnType)1 << numBits) - 1) << startBit;                  \
+    return (insn & ~fieldMask) | (bitVal << startBit);                         \
+  }
+ResetBitsDecl(reset_u16, uint16_t);
+
+static inline void branch_arm_impl(addr_t addr, addr_t target, char *opcode,
+                                   uint32_t tmpopc) {
+  /*
+   31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10 9 8 7 6 5 4
+   3 2 1 0 cond     1  0  1  0                               imm24
+   */
+  const uint32_t mask24 = 0xFFFFFF;
+  uint32_t offset = (uint32_t)((target - (addr + 8)) / 4);
+  uint32_t *ptr = (uint32_t *)opcode;
+  *ptr = tmpopc;
+  *ptr &= ~mask24;
+  *ptr |= offset & mask24;
+}
+
+static inline void condbranch_arm_impl(addr_t addr, addr_t target, char *opcode,
+                                       uint32_t tmpopc) {
+  branch_arm_impl(addr, target, opcode, tmpopc);
+}
+
+static inline void branch_arm(addr_t addr, addr_t target, char *opcode) {
+  uint32_t tmpopc = 0xEAFFFFFF;
+  branch_arm_impl(addr, target, opcode, tmpopc);
+}
+
+static inline void branch_link_arm(addr_t addr, addr_t target, char *opcode) {
+  uint32_t tmpopc = 0xEBFFFFB0;
+  branch_arm_impl(addr, target, opcode, tmpopc);
+}
+
+static inline void branch_linkx_arm(addr_t addr, addr_t target, char *opcode) {
+  /*
+   31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10 9 8 7 6 5 4
+   3 2 1 0 1  1  1  1  1  0  1  H                               imm24
+   */
+  uint32_t tmpopc = 0xFBFFFFB0;
+  const uint32_t mask24 = 0xFFFFFF;
+  uint32_t offset = (uint32_t)((target - (addr + 8)) / 2);
+  uint32_t *ptr = (uint32_t *)opcode;
+  *ptr = tmpopc;
+  *ptr &= ~mask24;
+  *ptr |= offset & mask24;
+}
+
+static inline void cmpbranch_thumb_impl(addr_t addr, addr_t target,
+                                        char *opcode, uint16_t tmpopc) {
+  /*
+   15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0
+    1  0  1  1 op  0 i 1    imm5    Rn
+   */
+  // imm32 = ZeroExtend(i:imm5:’0’, 32);
+  const uint16_t mask5 = 0x1F;
+  uint16_t offset = (uint16_t)(target - (addr + 4));
+  uint16_t imm5 = (offset >> 1) & mask5;
+  uint16_t i = (offset >> 6) & 1;
+  uint16_t *ptr = (uint16_t *)opcode;
+  *ptr = tmpopc;
+  *ptr = reset_u16(*ptr, 3, 5, imm5);
+  *ptr = reset_u16(*ptr, 9, 1, i);
+}
+
+static inline void branch_thumb_2_impl(addr_t addr, addr_t target, char *opcode,
+                                       uint16_t tmpopc) {
+  /*
+   15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0
+    1  1  1  0  0          imm11
+   */
+  const uint16_t mask11 = 0x7FF;
+  uint16_t offset = (uint16_t)((target - (addr + 4)) / 2);
+  uint16_t *ptr = (uint16_t *)opcode;
+  *ptr = tmpopc;
+  *ptr &= ~mask11;
+  *ptr |= offset & mask11;
+}
+
+static inline void condbranch_thumb_2_impl(addr_t addr, addr_t target,
+                                           char *opcode, uint16_t tmpopc) {
+  /*
+   15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0
+    1  1  1  0      cond      imm8
+   */
+  const uint16_t mask8 = 0xFF;
+  uint16_t offset = (uint16_t)((target - (addr + 4)) / 2);
+  uint16_t *ptr = (uint16_t *)opcode;
+  *ptr = tmpopc;
+  *ptr &= ~mask8;
+  *ptr |= offset & mask8;
+}
+
+static inline void branch_thumb_2(addr_t addr, addr_t target, char *opcode) {
+  uint16_t tmpopc = 0xE7FF;
+  branch_thumb_2_impl(addr, target, opcode, tmpopc);
+}
+
+static inline void branch_thumb_4_impl(addr_t addr, addr_t target, char *opcode,
+                                       uint32_t tmpopc) {
+  /*
+   high                                  low
+   15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0
+    1  1  1  1  0  S         imm10        1  1 J1  1 J2          imm11
+   */
+  const uint16_t mask10 = 0x3FF;
+  const uint16_t mask11 = 0x7FF;
+  uint16_t *hig16 = (uint16_t *)&tmpopc;
+  uint16_t *low16 = hig16 + 1;
+  uint32_t offset = (uint32_t)(target - (addr + 4));
+  // I1 = NOT(J1 EOR S); I2 = NOT(J2 EOR S); imm32 =
+  // SignExtend(S:I1:I2:imm10:imm11:’0’, 32);
+  uint16_t S = (offset >> 24) & 1;
+  uint16_t I1 = (offset >> 23) & 1;
+  uint16_t I2 = (offset >> 22) & 1;
+  uint16_t imm10 = (offset >> 12) & mask10;
+  uint16_t imm11 = (offset >> 1) & mask11;
+  uint16_t J1 = ((~I1) ^ S) & 1;
+  uint16_t J2 = ((~I2) ^ S) & 1;
+  *hig16 = reset_u16(*hig16, 10, 1, S);
+  *hig16 = reset_u16(*hig16, 0, 10, imm10);
+  *low16 = reset_u16(*low16, 13, 1, J1);
+  *low16 = reset_u16(*low16, 11, 1, J2);
+  *low16 = reset_u16(*low16, 0, 11, imm11);
+  *(uint32_t *)opcode = tmpopc;
+}
+
+static inline void condbranch_thumb_4_impl(addr_t addr, addr_t target,
+                                           char *opcode, uint32_t tmpopc) {
+  /*
+   high                                  low
+   15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0
+    1  1  1  1  0  S    cond     imm6     1  1 J1  1 J2          imm11
+   */
+  const uint16_t mask6 = 0x3F;
+  const uint16_t mask11 = 0x7FF;
+  uint16_t *hig16 = (uint16_t *)&tmpopc;
+  uint16_t *low16 = hig16 + 1;
+  uint32_t offset = (uint32_t)(target - (addr + 4));
+  // imm32 = SignExtend(S:J2:J1:imm6:imm11:’0’, 32);
+  uint16_t S = (offset >> 20) & 1;
+  uint16_t J2 = (offset >> 19) & 1;
+  uint16_t J1 = (offset >> 18) & 1;
+  uint16_t imm6 = (offset >> 12) & mask6;
+  uint16_t imm11 = (offset >> 1) & mask11;
+  *hig16 = reset_u16(*hig16, 10, 1, S);
+  *hig16 = reset_u16(*hig16, 0, 6, imm6);
+  *low16 = reset_u16(*low16, 13, 1, J1);
+  *low16 = reset_u16(*low16, 11, 1, J2);
+  *low16 = reset_u16(*low16, 0, 11, imm11);
+  *(uint32_t *)opcode = tmpopc;
+}
+
+static inline void branch_thumb_4(addr_t addr, addr_t target, char *opcode) {
+  uint32_t tmpopc = 0xBD63F000;
+  branch_thumb_4_impl(addr, target, opcode, tmpopc);
+}
+
+static inline void branch_link_thumb_4(addr_t addr, addr_t target,
+                                       char *opcode) {
+  uint32_t tmpopc = 0xF897F000;
+  branch_thumb_4_impl(addr, target, opcode, tmpopc);
+}
+
+static inline void branch_linkx_thumb_4(addr_t addr, addr_t target,
+                                        char *opcode) {
+  /*
+   15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0
+    1  1  1  1  0  S       imm10H         1  1 J1  0 J2        imm10L        H
+   */
+  uint32_t tmpopc = 0xEE72F7FE;
+  const uint16_t mask10 = 0x3FF;
+  uint16_t *hig16 = (uint16_t *)&tmpopc;
+  uint16_t *low16 = hig16 + 1;
+  uint32_t offset = (uint32_t)(target - llvm::alignDown(addr + 4, 4));
+  // I1 = NOT(J1 EOR S); I2 = NOT(J2 EOR S); imm32 =
+  // SignExtend(S:I1:I2:imm10H:imm10L:’00’, 32);
+  uint16_t S = (offset >> 24) & 1;
+  uint16_t I1 = (offset >> 23) & 1;
+  uint16_t I2 = (offset >> 22) & 1;
+  uint16_t imm10H = (offset >> 12) & mask10;
+  uint16_t imm10L = (offset >> 2) & mask10;
+  uint16_t J1 = ((~I1) ^ S) & 1;
+  uint16_t J2 = ((~I2) ^ S) & 1;
+  *hig16 = reset_u16(*hig16, 10, 1, S);
+  *hig16 = reset_u16(*hig16, 0, 10, imm10H);
+  *low16 = reset_u16(*low16, 13, 1, J1);
+  *low16 = reset_u16(*low16, 11, 1, J2);
+  *low16 = reset_u16(*low16, 1, 10, imm10L);
+  *(uint32_t *)opcode = tmpopc;
+}
+
+static InsnType inst_type(ArchType arch, void *llvminst) {
+  InsnType itype;
+  if (arch == ARM) {
+    MachineARM m;
+    itype = m.insnType(llvminst);
+  } else {
+    MachineARM64 m;
+    itype = m.insnType(llvminst);
+  }
+  return itype;
+}
+
+static int calc_skip_insns_arm(Function *fn, int i, const char *fnrawbuff) {
+  /*
+   * the following insns are just a jump...
+   *
+  0.text:00011490 03 B5           PUSH            {R0,R1,LR}
+  1.text:00011492                 LDR             R0, =dword_38
+  2.text:00011494                 BL              loc_114A0
+  ;......
+  x.text:000114A0 loc_114A0                               ; CODE XREF:
+  .text:00011494↑j x.text:000114A0                                         ;
+  .text:000121F2↓j ... x.text:000114A0                 BLX             sub_A658
+  x.text:0000A650 F7FF4620 0000FE9F E3CE1001 E7911100
+  3.text:0000A658 01 10 CE E3                 BIC             R1, LR, #1
+  4.text:0000A65C 00 11 91 E7                 LDR             R1, [R1,R0,LSL#2]
+  5.text:0000A660 0E 10 81 E0                 ADD             R1, R1, LR
+  6.text:0000A664 08 E0 9D E5                 LDR             LR, [SP,#arg_8]
+  7.text:0000A668 08 10 8D E5                 STR             R1, [SP,#arg_8]
+  8.text:0000A66C 03 80 BD E8                 LDMFD           SP!, {R0,R1,PC}
+  */
+  const char *curbuff = fnrawbuff + fn->insns[i].fnoff;
+  if (*(unsigned short *)curbuff == 0xB503) {
+    const char *stubbuffstart = fnrawbuff + fn->insns[i + 3].fnoff;
+    const char *stubbuffend = fnrawbuff + fn->insns[i + 8].fnoff;
+    if (*(unsigned int *)stubbuffstart == 0xE3CE1001 &&
+        *(unsigned int *)stubbuffend == 0xE8BD8003) {
+      if (fn->insns[i + 8].gouts.size()) {
+        return 8; // goto jump directly
+      }
+      return 9; // ignore this jump stubs
+    }
+  }
+  return 0;
+}
+
+static int calc_skip_insns_arm64(Function *fn, int i, const char *fnrawbuff) {
+  return 0;
+}
+
+addr_t Binary::rewriteFunction(addr_t rtbase, addr_t entry, Function *fn,
+                               char *fnbuff, const char *fnrawbuff,
+                               const void *rawregs,
+                               std::map<int, int> &rvamap) {
+#if 0
+  for (size_t i = 0, e = fn->insns.size(); i < e; i++) {
+    for (size_t j = i + 1; j < e; j++) {
+      if (fn->insns[i].fnoff == fn->insns[j].fnoff) {
+        printf("dummy insn.fnoff %d %d %x\n", (int)i, (int)j, (int)(entry + fn->insns[i].fnoff));
+      }
+    }
+  }
+#endif
+
+  std::map<int, int> tmprvamap, rvaold2new;
+  // init rvaold2new
+  rewriteFunctionImpl(rtbase, entry, fn, fnbuff, fnrawbuff, rawregs, tmprvamap,
+                      rvaold2new);
+  // real write
+  return rewriteFunctionImpl(rtbase, entry, fn, fnbuff, fnrawbuff, rawregs,
+                             rvamap, rvaold2new);
+}
+
+static int rvaold2new_find_0(std::map<int, int> &rvaold2new, int old) {
+  auto found = rvaold2new.find(old);
+  if (found != rvaold2new.end()) {
+    return found->second;
+  }
+  return 0;
+}
+
+addr_t Binary::rewriteFunctionImpl(addr_t rtbase, addr_t entry, Function *fn,
+                                   char *fnbuff, const char *fnrawbuff,
+                                   const void *rawregs,
+                                   std::map<int, int> &rvamap,
+                                   std::map<int, int> &rvaold2new) {
+  int fnrva = (int)(entry - imageBase());
+  int currva = fnrva;
+  Disassembler *diser = this->diser();
+  std::map<const char *, int> pairopcode;
+  const char *nop, *cmpcodefmt;
+  char cmpcode[20];
+  size_t nopsz;
+  std::pair<int, int> nopopc, retopc;
+  MCInst movw, movt;
+  if (archType() == ARM) {
+    if (fn->start & 1) {
+      diser = diserThumb();
+    }
+    nopopc = assemble_code(diser, "nop");
+    retopc = assemble_code(diser, "bx lr");
+    nop = (char *)&nopopc.second;
+    nopsz = nopopc.first;
+    cmpcodefmt = "cmp fp, #%d";
+
+    diser->disassemble("movw r0, #0", movw);
+    diser->disassemble("movt r0, #0", movt);
+  } else {
+    retopc = assemble_code(diser, "ret");
+    nop = (char *)&opc_arm64_nop;
+    nopsz = 4;
+    cmpcodefmt = "cmp fp, #%d";
+  }
+
+  MCInst inst;
+  char *newopcode = fnbuff;
+  currva = fnrva;
+  for (int i = 0; i < fn->insns.size(); i++) {
+    if (archType() == ARM) {
+      i += calc_skip_insns_arm(fn, i, fnrawbuff);
+    } else {
+      i += calc_skip_insns_arm64(fn, i, fnrawbuff);
+    }
+
+    auto &ii = fn->insns[i];
+    int64_t origrva = fnrva + ii.fnoff;
+    addr_t origaddr = imageBase() + origrva;
+    rvamap.insert({currva, origrva});
+    rvaold2new.insert({origrva, currva});
+#if 0
+  if (rvaold2new.size() == fn->insns.size()) {
+    if (currva == 0) {
+      puts("debug me.");
+    }
+    if (ii.gouts.size()) {
+      for (auto o : ii.gouts) {
+        auto tarrva = rvaold2new_find_0(rvaold2new, fnrva + fn->insns[o].fnoff);
+        printf("Branch %x To %x\n", (int)currva, (int)tarrva);
+      }
+    }
+    printf("%x : %x\n", (int)currva, (int)origrva);
+    fflush(stdout);
+  }
+#endif
+
+    // make ida decompiler happy
+#define put_fake_cmp()                                                         \
+  {                                                                            \
+    sprintf(cmpcode, cmpcodefmt, outidx++);                                    \
+    std::pair<int, int> cmpopc = assemble_code(diser, cmpcode);                \
+    *(int *)newopcode = cmpopc.second;                                         \
+    currva += 4;                                                               \
+    newopcode += 4;                                                            \
+  }
+
+#define put_bcond_squence_arm()                                                \
+  {                                                                            \
+    int outidx = 0;                                                            \
+    for (auto o : ii.gouts) {                                                  \
+      auto tarrva = rvaold2new_find_0(rvaold2new, fnrva + fn->insns[o].fnoff); \
+      put_fake_cmp();                                                          \
+      if (diser == diserThumb())                                               \
+        condbranch_thumb_4_impl(currva, tarrva, newopcode, 0x879DF000);        \
+      else                                                                     \
+        condbranch_arm_impl(currva, tarrva, newopcode, 0x1AFFFFEF);            \
+      currva += 4;                                                             \
+      newopcode += 4;                                                          \
+    }                                                                          \
+    /* loop end will update the last oplen */                                  \
+    currva -= 4;                                                               \
+    newopcode -= 4;                                                            \
+    proced = true;                                                             \
+  }
+
+#define put_bcond_squence_arm64()                                              \
+  {                                                                            \
+    int outidx = 0;                                                            \
+    for (auto o : ii.gouts) {                                                  \
+      auto tarrva = rvaold2new_find_0(rvaold2new, fnrva + fn->insns[o].fnoff); \
+      put_fake_cmp();                                                          \
+      pcrela_imm19_a64(opc_arm64_b_lt, currva, tarrva, newopcode);             \
+      currva += 4;                                                             \
+      newopcode += 4;                                                          \
+    }                                                                          \
+    /* loop end will update the last oplen */                                  \
+    currva -= 4;                                                               \
+    newopcode -= 4;                                                            \
+    proced = true;                                                             \
+  }
+
+    const char *origopc = fnrawbuff + ii.fnoff;
+    bool fillnop = false, proced = false;
+    int usedopcbuff;
+    unsigned char *usedopc = (unsigned char *)origopc;
+    auto pairopcit = pairopcode.find(origopc);
+    if (pairopcit != pairopcode.end()) {
+      usedopcbuff = pairopcit->second;
+      usedopc = (unsigned char *)&usedopcbuff;
+      pairopcode.erase(pairopcit);
+    }
+    int consumed = diser->disassemble(usedopc, 16, inst);
+    if (!consumed) {
+      fillnop = true;
+      inst.setOpcode(0);
+    }
+    switch (archType()) {
+    case ARM: {
+      switch (inst.getOpcode()) {
+      case ARM::tLDRpci:
+      case ARM::t2LDRpci: {
+        int pcoffrva = (int)(llvm::alignDown(origrva + 4, 4) +
+                             inst.getOperand(1).getImm());
+        unsigned reg = inst.getOperand(0).getReg();
+        int addpcrva = fnrva + ii.fnoff + ii.info.oplen;
+        bool canfix = false;
+        for (int opclen = 0;; addpcrva += opclen) {
+          MCInst pairinst;
+          opclen = diser->disassemble(
+              (unsigned char *)fnrawbuff + addpcrva - fnrva, 4, pairinst);
+          if (!opclen) {
+            break;
+          }
+          auto itype = inst_type(archType(), &pairinst);
+          if (itype == JUMP || itype == JCOND) {
+            break;
+          }
+          if (pairinst.getNumOperands() < 3) {
+            continue;
+          }
+          auto opr0 = pairinst.getOperand(0);
+          auto opr1 = pairinst.getOperand(2);
+          if (!opr0.isReg() || !opr1.isReg()) {
+            continue;
+          }
+          auto opc = pairinst.getOpcode();
+          if (opr0.getReg() == reg && opr1.getReg() == ARM::PC &&
+              (opc == ARM::tADDrr || opc == ARM::tADDhirr)) {
+            canfix = true;
+            break;
+          }
+        }
+        if (!canfix) {
+          break;
+        }
+        int targetrva =
+            (int)addpcrva + 4 + *(int *)(fnrawbuff + pcoffrva - fnrva);
+        int new_addpcrva = rvaold2new_find_0(rvaold2new, addpcrva);
+        uint32_t new_off =
+            (uint32_t)(targetrva - (int)llvm::alignDown(new_addpcrva + 4, 4));
+        movw.getOperand(0).setReg(reg);
+        movw.getOperand(1).setImm(new_off & 0xFFFF);
+        movt.getOperand(0).setReg(reg);
+        movt.getOperand(1).setReg(reg);
+        movt.getOperand(2).setImm(new_off >> 16);
+        auto movwopc = assemble_code(diser, movw);
+        auto movtopc = assemble_code(diser, movt);
+        *(int *)(newopcode + 0) = movwopc.second;
+        *(int *)(newopcode + 4) = movtopc.second;
+        // the loop end will add oplen
+        newopcode += (8 - ii.info.oplen);
+        currva += (8 - ii.info.oplen);
+        proced = true;
+        break;
+      }
+      case ARM::LDRi12: {
+        break;
+      }
+      case ARM::ADR: {
+        break;
+      }
+      case ARM::tADR: {
+        break;
+      }
+      case ARM::t2ADR: {
+        break;
+      }
+      case ARM::tBLXNSr: {
+        break;
+      }
+      case ARM::tBLXr:
+      case ARM::BLX:
+      case ARM::BLX_pred: {
+        auto mapregs = (std::map<addr_t, std::vector<arm_subregs_t>> *)rawregs;
+        auto found = mapregs->find(rtbase + origrva);
+        addr_t target =
+            diser->branchTarget((unsigned char *)usedopc, origaddr, inst,
+                                ii.info.oplen, &found->second[0].gprs[0]);
+        target = imageBase() + target - rtbase;
+        if (isCode(target)) {
+          if (inst.getOpcode() == ARM::tBLXr) {
+            branch_link_thumb_4(imageBase() + currva, target, newopcode);
+            // the loop end will add oplen
+            newopcode += (4 - ii.info.oplen);
+          } else {
+            branch_link_arm(imageBase() + currva, target, newopcode);
+          }
+          proced = true;
+        }
+        break;
+      }
+      case ARM::tBX:
+      case ARM::BX:
+      case ARM::BX_pred: {
+        switch (ii.gouts.size()) {
+        case 0:
+          if (&ii == &fn->insns[fn->insns.size() - 1]) {
+            // tail call
+            auto mapregs =
+                (std::map<addr_t, std::vector<arm_subregs_t>> *)rawregs;
+            auto found = mapregs->find(rtbase + origrva);
+            addr_t target =
+                diser->branchTarget((unsigned char *)usedopc, origaddr, inst,
+                                    ii.info.oplen, &found->second[0].gprs[0]);
+            target = imageBase() + target - rtbase;
+            if (isCode(target)) {
+              if (inst.getOpcode() == ARM::tBX) {
+                branch_thumb_4(imageBase() + currva, target, newopcode);
+                // the loop end will add oplen
+                newopcode += (4 - ii.info.oplen);
+              } else {
+                branch_arm(imageBase() + currva, target, newopcode);
+              }
+              proced = true;
+            }
+          } else {
+            fillnop = true;
+          }
+          break;
+        case 1: {
+          auto &tarii = fn->insns[ii.gouts[0]];
+          if (inst.getOpcode() == ARM::tBX) {
+            branch_thumb_4(currva,
+                           rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                           newopcode);
+            // the loop end will add oplen
+            newopcode += (4 - ii.info.oplen);
+          } else {
+            branch_arm(currva,
+                       rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                       newopcode);
+          }
+          proced = true;
+          break;
+        }
+        default: {
+          put_bcond_squence_arm();
+          break;
+        }
+        }
+        break;
+      }
+      case ARM::MOVr:
+      case ARM::tMOVr:
+      case ARM::t2MOVr: {
+        if (inst.getOperand(0).getReg() == ARM::PC) {
+          fillnop = true;
+        }
+        break;
+      }
+      case ARM::B:
+      case ARM::tB:
+      case ARM::t2B: {
+        switch (ii.gouts.size()) {
+        case 0: {
+          auto mapregs =
+              (std::map<addr_t, std::vector<arm_subregs_t>> *)rawregs;
+          auto target = diser->branchTarget((unsigned char *)usedopc, origaddr);
+          auto tarrva = target - imageBase();
+          auto execrva0 = mapregs->begin()->first - rtbase;
+          auto execrva1 = mapregs->rbegin()->first - rtbase;
+          if ((tarrva < execrva0 || tarrva > execrva1) &&
+              addrFunc(target, true)) {
+            // tail call
+            if (inst.getOpcode() == ARM::B) {
+              branch_arm(currva, target - imageBase(), newopcode);
+            } else if (ii.info.oplen == 4) {
+              branch_thumb_4(currva, target - imageBase(), newopcode);
+            } else {
+              branch_thumb_2(currva, target - imageBase(), newopcode);
+            }
+            proced = true;
+          } else {
+            fillnop = true;
+          }
+          break;
+        }
+        case 1: {
+          auto &tarii = fn->insns[ii.gouts[0]];
+          if (inst.getOpcode() == ARM::t2B) {
+            branch_thumb_4(currva,
+                           rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                           newopcode);
+          } else if (inst.getOpcode() == ARM::tB) {
+            if (ii.info.oplen == 4) {
+              branch_thumb_4(currva,
+                             rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                             newopcode);
+            } else {
+              branch_thumb_2(currva,
+                             rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                             newopcode);
+            }
+          } else {
+            branch_arm(currva,
+                       rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                       newopcode);
+          }
+          proced = true;
+          break;
+        }
+        default: {
+          put_bcond_squence_arm();
+          break;
+        }
+        }
+        break;
+      }
+      case ARM::BLXi:
+      case ARM::tBLXi: {
+        auto target = diser->branchTarget((unsigned char *)usedopc, origaddr);
+        if (inst.getOpcode() == ARM::BLXi) {
+          branch_linkx_arm(currva, target - imageBase(), newopcode);
+        } else {
+          branch_linkx_thumb_4(currva, target - imageBase(), newopcode);
+        }
+        proced = true;
+        break;
+      }
+      case ARM::BL:
+      case ARM::tBL: {
+        auto target = diser->branchTarget((unsigned char *)usedopc, origaddr);
+        if (inst.getOpcode() == ARM::BL) {
+          branch_link_arm(currva, target - imageBase(), newopcode);
+        } else {
+          branch_link_thumb_4(currva, target - imageBase(), newopcode);
+        }
+        proced = true;
+        break;
+      }
+      case ARM::Bcc:
+      case ARM::tBcc:
+      case ARM::t2Bcc:
+      case ARM::tCBZ:
+      case ARM::tCBNZ: {
+        switch (ii.gouts.size()) {
+        case 0:
+          fillnop = true;
+          break;
+        case 1: {
+          auto &tarii = fn->insns[ii.gouts[0]];
+          if (inst.getOpcode() == ARM::Bcc) {
+            branch_arm(currva,
+                       rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                       newopcode);
+          } else if (ii.info.oplen == 4) {
+            branch_thumb_4(currva,
+                           rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                           newopcode);
+          } else {
+            branch_thumb_2(currva,
+                           rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                           newopcode);
+          }
+          proced = true;
+          break;
+        }
+        case 2: {
+          auto *tarii0 = &fn->insns[ii.gouts[0]];
+          auto *tarii1 = &fn->insns[ii.gouts[1]];
+          auto tarrva = 0;
+          if (tarii0 == &ii + 1) {
+            tarrva = rvaold2new_find_0(rvaold2new, fnrva + tarii1->fnoff);
+          } else if (tarii1 == &ii + 1) {
+            tarrva = rvaold2new_find_0(rvaold2new, fnrva + tarii0->fnoff);
+          } else {
+            put_bcond_squence_arm();
+            break;
+          }
+          switch (inst.getOpcode()) {
+          case ARM::Bcc:
+            condbranch_arm_impl(currva, tarrva, newopcode, *(int *)usedopc);
+            break;
+          case ARM::tBcc:
+            condbranch_thumb_2_impl(currva, tarrva, newopcode,
+                                    *(uint16_t *)usedopc);
+            if (ii.info.oplen == 4) {
+              *(short *)(newopcode + 2) = *(short *)nop;
+            }
+            break;
+          case ARM::t2Bcc:
+            condbranch_thumb_4_impl(currva, tarrva, newopcode, *(int *)usedopc);
+            break;
+          // ARM::tCBZ ARM::tCBNZ:
+          default:
+            cmpbranch_thumb_impl(currva, tarrva, newopcode,
+                                 *(uint16_t *)usedopc);
+            if (ii.info.oplen == 4) {
+              *(short *)(newopcode + 2) = *(short *)nop;
+            }
+            break;
+          }
+          // skip orig space
+          newopcode += 4;
+          currva += 4;
+          // make left opcode to nop, as we have add more 8 bytes opcode
+          for (int i = 0; i < 8 / nopsz; i++) {
+            memcpy(newopcode + i * nopsz, nop, nopsz);
+          }
+          // for fake cmp space
+          /* loop end will update the last oplen */
+          newopcode += 4;
+          currva += 4;
+          proced = true;
+          break;
+        }
+        default: {
+          put_bcond_squence_arm();
+          break;
+        }
+        }
+        break;
+      }
+      default:
+        break;
+      }
+      break;
+    }
+    case ARM64:
+      switch (inst.getOpcode()) {
+      case AArch64::ADR: {
+        int64_t targetrva = origrva + (int64_t)inst.getOperand(1).getImm();
+        adr_a64(*(int *)usedopc, rvaold2new_find_0(rvaold2new, (int)origrva),
+                targetrva, newopcode);
+        break;
+      }
+      case AArch64::ADRP: {
+        unsigned reg = inst.getOperand(0).getReg();
+        const unsigned char *pairopc = (unsigned char *)origopc + ii.info.oplen;
+        MCInst pairinst;
+        bool canfix = false;
+        for (int opclen = 0;; pairopc += opclen) {
+          opclen = diser->disassemble(pairopc, 4, pairinst);
+          if (!opclen) {
+            break;
+          }
+          auto itype = inst_type(archType(), &pairinst);
+          if (itype == JUMP || itype == JCOND) {
+            break;
+          }
+          if (pairinst.getNumOperands() < 2) {
+            continue;
+          }
+          auto opr0 = pairinst.getOperand(0);
+          auto opr1 = pairinst.getOperand(1);
+          if (!opr0.isReg() || !opr1.isReg()) {
+            continue;
+          }
+          auto opc = pairinst.getOpcode();
+          if ((opr0.getReg() == reg || opr1.getReg() == reg) &&
+              (opc == AArch64::ADDXri || opc == AArch64::LDRXui ||
+               opc == AArch64::STRXui)) {
+            canfix = true;
+            break;
+          }
+        }
+        if (!canfix) {
+          break;
+        }
+        int immscale = pairinst.getOpcode() == AArch64::ADDXri ? 1 : 8;
+        int64_t targetrva =
+            (origrva & ~(0x1000 - 1)) +
+            (int64_t)(inst.getOperand(1).getImm() * 0x1000 +
+                      pairinst.getOperand(2).getImm() * immscale);
+        auto newrva = rvaold2new_find_0(rvaold2new, (int)origrva);
+        auto pagecount =
+            adrp_a64(*(int *)usedopc, newrva, targetrva, newopcode);
+        auto pageoff =
+            targetrva - (newrva & ~(0x1000 - 1)) - pagecount * 0x1000;
+        // patch to new opcode
+        auto pairopcit = pairopcode.insert({(char *)pairopc, 0}).first;
+        if (pairinst.getOpcode() == AArch64::ADDXri) {
+          addi_a64(*(int *)pairopcit->first, (uint32_t)pageoff,
+                   (char *)&pairopcit->second);
+        } else {
+          ldstri_a64(*(int *)pairopcit->first, (uint32_t)pageoff / immscale,
+                     (char *)&pairopcit->second);
+        }
+        proced = true;
+        break;
+      }
+      case AArch64::B:
+      case AArch64::BR:
+      case AArch64::BRAA:
+      case AArch64::BRAB:
+      case AArch64::BRAAZ:
+      case AArch64::BRABZ: {
+        switch (ii.gouts.size()) {
+        case 0: {
+          auto mapregs =
+              (std::map<addr_t, std::vector<arm64_subregs_t>> *)rawregs;
+          auto found = mapregs->find(rtbase + origrva);
+          addr_t target =
+              diser->branchTarget((unsigned char *)usedopc, origaddr, inst,
+                                  ii.info.oplen, &found->second[0].gprs[0]);
+          if (inst.getOpcode() != AArch64::B) {
+            target = imageBase() + target - rtbase;
+          }
+          auto tarrva = target - imageBase();
+          auto execrva0 = mapregs->begin()->first - rtbase;
+          auto execrva1 = mapregs->rbegin()->first - rtbase;
+          if ((tarrva < execrva0 || tarrva > execrva1) &&
+              addrFunc(target, true)) {
+            // tail call
+            branch_a64(opc_arm64_b, imageBase() + currva, target, newopcode);
+            proced = true;
+          } else {
+            fillnop = true;
+          }
+          break;
+        }
+        case 1: {
+          auto &tarii = fn->insns[ii.gouts[0]];
+          branch_a64(opc_arm64_b, currva,
+                     rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                     newopcode);
+          proced = true;
+          break;
+        }
+        default: {
+          put_bcond_squence_arm64();
+          break;
+        }
+        }
+        break;
+      }
+      case AArch64::Bcc:
+      case AArch64::TBZW:
+      case AArch64::TBZX:
+      case AArch64::TBNZW:
+      case AArch64::TBNZX:
+      case AArch64::CBZW:
+      case AArch64::CBZX:
+      case AArch64::CBNZW:
+      case AArch64::CBNZX: {
+        switch (ii.gouts.size()) {
+        case 0:
+          fillnop = true;
+          break;
+        case 1: {
+          auto &tarii = fn->insns[ii.gouts[0]];
+          branch_a64(opc_arm64_b, currva,
+                     rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff),
+                     newopcode);
+          proced = true;
+          break;
+        }
+        case 2: {
+          auto *tarii0 = &fn->insns[ii.gouts[0]];
+          auto *tarii1 = &fn->insns[ii.gouts[1]];
+          auto tarrva = 0;
+          if (ii.gouts[0] == i + 1) {
+            tarrva = rvaold2new_find_0(rvaold2new, fnrva + tarii1->fnoff);
+          } else if (ii.gouts[1] == i + 1) {
+            tarrva = rvaold2new_find_0(rvaold2new, fnrva + tarii0->fnoff);
+          } else {
+            put_bcond_squence_arm64();
+            break;
+          }
+          switch (inst.getOpcode()) {
+          case AArch64::TBZW:
+          case AArch64::TBZX:
+          case AArch64::TBNZW:
+          case AArch64::TBNZX:
+            branch_imm14_a64(*(int *)usedopc, currva, tarrva, newopcode);
+            break;
+          default:
+            pcrela_imm19_a64(*(int *)usedopc, currva, tarrva, newopcode);
+            break;
+          }
+          // skip orig space
+          newopcode += 4;
+          currva += 4;
+          // make left opcode to nop, as we have add more 8 bytes opcode
+          for (int i = 0; i < 8 / nopsz; i++) {
+            memcpy(newopcode + i * nopsz, nop, nopsz);
+          }
+          // for fake cmp space
+          /* loop end will update the last oplen */
+          newopcode += 4;
+          currva += 4;
+          proced = true;
+          break;
+        }
+        default: {
+          put_bcond_squence_arm64();
+          break;
+        }
+        }
+        break;
+      }
+      case AArch64::BL:
+      case AArch64::BLR:
+      case AArch64::BLRAA:
+      case AArch64::BLRAB:
+      case AArch64::BLRAAZ:
+      case AArch64::BLRABZ: {
+        auto mapregs =
+            (std::map<addr_t, std::vector<arm64_subregs_t>> *)rawregs;
+        auto found = mapregs->find(rtbase + origrva);
+        addr_t target =
+            diser->branchTarget((unsigned char *)usedopc, origaddr, inst,
+                                ii.info.oplen, &found->second[0].gprs[0]);
+        if (inst.getOpcode() != AArch64::BL) {
+          target = imageBase() + target - rtbase;
+        }
+        if (isCode(target)) {
+          branch_a64(opc_arm64_bl, imageBase() + currva, target, newopcode);
+          proced = true;
+        }
+        break;
+      }
+      case AArch64::LDRSWl:
+      case AArch64::LDRWl:
+      case AArch64::LDRXl:
+      case AArch64::LDRSl:
+      case AArch64::LDRDl:
+      case AArch64::LDRQl: {
+        int64_t imm = inst.getOperand(1).getImm();
+        addr_t targetrva = (int64_t)origrva + (imm << 2);
+        pcrela_imm19_a64(*(int *)usedopc, currva, targetrva, newopcode);
+        proced = true;
+        break;
+      }
+      default:
+        break;
+      }
+      break;
+    default:
+      break;
+    }
+    if (!proced) {
+      if (fillnop) {
+        // keep opcode size
+        for (int i = 0; i < ii.info.oplen / nopsz; i++) {
+          memcpy(newopcode + i * nopsz, nop, nopsz);
+        }
+      } else {
+        memcpy(newopcode, usedopc, consumed);
+        // make left opcode to nop
+        for (int i = consumed / nopsz; i < ii.info.oplen / nopsz; i++) {
+          memcpy(newopcode + i * nopsz, nop, nopsz);
+        }
+      }
+    }
+    newopcode += ii.info.oplen;
+    currva += ii.info.oplen;
+    if (!proced && diser == diserThumb()) {
+      // make pc dep thumb insn to 4 bytes thumb2 insn
+      // if not proced, fill a nop to the added 2 bytes
+      switch (inst.getOpcode()) {
+      case ARM::tLDRpci:
+        *(short *)newopcode = *(short *)nop;
+        newopcode += 2;
+        *(short *)newopcode = *(short *)nop;
+        newopcode += 2;
+        *(short *)newopcode = *(short *)nop;
+        newopcode += 2;
+        currva += 6;
+        break;
+      case ARM::t2LDRpci:
+        *(short *)newopcode = *(short *)nop;
+        newopcode += 2;
+        *(short *)newopcode = *(short *)nop;
+        newopcode += 2;
+        currva += 4;
+        break;
+      case ARM::tBLXr:
+      case ARM::tBX:
+        if (ii.info.oplen == 2) {
+          *(short *)newopcode = *(short *)nop;
+          newopcode += 2;
+          currva += 2;
+        }
+        break;
+      default:
+        break;
+      }
+    }
+    if (ii.gouts.size()) {
+      // splited bb may have this situation, add jump for normal insn
+      if (inst_type(archType(), &inst) == NORMAL) {
+        if (ii.gouts.size() == 1) {
+          if (i + 1 != ii.gouts[0]) {
+            auto &tarii = fn->insns[ii.gouts[0]];
+            auto tarrva = rvaold2new_find_0(rvaold2new, fnrva + tarii.fnoff);
+            if (diser == diserThumb()) {
+              branch_thumb_4(currva, tarrva, newopcode);
+            } else if (archType() == ARM64) {
+              branch_a64(opc_arm64_b, currva, tarrva, newopcode);
+            } else {
+              branch_arm(currva, tarrva, newopcode);
+            }
+          } else {
+            continue;
+          }
+        } else {
+          if (archType() == ARM64) {
+            put_bcond_squence_arm64();
+          } else {
+            put_bcond_squence_arm();
+          }
+        }
+        newopcode += 4;
+        currva += 4;
+      }
+    }
+  }
+  // append a return insn to make ida happy
+  memcpy(newopcode, &retopc.second, retopc.first);
+  currva += retopc.first;
+  // return the new function end to caller, dyn-retdec like it.
+  return imageBase() + currva;
+}
+
+InsnType Binary::opcodeType(Disassembler *diser, const char *opcode,
+                            ArchType arch, int *size, OpcodeInfo *opinfo) {
+  if (opinfo) {
+    memset(opinfo, 0, sizeof(*opinfo));
+  }
+
+  MCInst inst;
+  int consumed = diser->disassemble((unsigned char *)opcode, 16, inst);
+  if (size)
+    *size = consumed;
+  if (!consumed) {
+    return IDATA;
+  }
+  if (arch == ARM64) {
+    MachineARM64 m;
+    return m.insnType(&inst, opinfo);
+  }
+  if (arch == X86 || arch == X86_64) {
+    MachineX86 m;
+    return m.insnType(&inst, opinfo);
+  }
+  MachineARM m;
+  return m.insnType(&inst, opinfo);
+}
+
+std::vector<std::set<int>>
+Binary::matchTemplate(const std::vector<const char *> *insns, int count,
+                      std::string &err) {
+  std::vector<std::set<int>> rvas;
+  std::vector<std::vector<MCInst>> tmpinsts;
+  rvas.resize(count);
+  tmpinsts.resize(count);
+  unsigned char opcode[20];
+  for (int c = 0; c < count; c++) {
+    for (auto i : insns[c]) {
+      err = m_diser->assemble(i, opcode);
+      if (opcode[0] == 0)
+        return rvas;
+      tmpinsts[c].emplace_back(MCInst());
+      if (!m_diser->disassemble(&opcode[1], opcode[0], *tmpinsts[c].rbegin())) {
+        err = "Failed to disassemble when parse template instructions";
+        return rvas;
+      }
+    }
+  }
+  for (auto &s : m_sects) {
+    auto &sect = s.second;
+    if (sect.type != TEXT) {
+      continue;
+    }
+    MCInst inst;
+    auto rvabase = sect.addr - imageBase();
+    auto sbuff = (const unsigned char *)addrBuff(sect.addr);
+    for (auto ptr = sbuff, ptrend = sbuff + sect.size; ptr < ptrend;) {
+      auto consumed = m_diser->disassemble(ptr, 16, inst);
+      if (!consumed)
+        consumed = 4;
+      for (int c = 0; c < count; c++) {
+        bool matched = true;
+        auto startptr = ptr;
+        for (auto &i : tmpinsts[c]) {
+          if (inst.getOpcode() != i.getOpcode()) {
+            matched = false;
+            break;
+          }
+          ptr += consumed;
+          consumed = m_diser->disassemble(ptr, 16, inst);
+        }
+        if (matched) {
+          rvas[c].insert((int)(rvabase + startptr - sbuff));
+          break;
+        }
+      }
+      ptr += consumed;
+    }
+  }
+  return rvas;
+}
+
+uint32_t Binary::genBranchOpcode(uint64_t from, uint64_t to, bool call) {
+  uint32_t opcode;
+  branch_a64(call ? opc_arm64_bl : opc_arm64_b, from, to, (char *)&opcode);
+  return opcode;
+}
+
+static Binary *NewMachO(object::Binary *llvmbin, MemoryBuffer *buff,
+                        bool analyze) {
+  object::MachOObjectFile *macho = dyn_cast<object::MachOObjectFile>(llvmbin);
+  assert(macho && "must be macho binary");
+  Binary *result = nullptr;
+  switch (macho->getArch()) {
+  case Triple::x86_64:
+    result = new MachOX64Binary;
+    break;
+  case Triple::x86:
+    result = new MachOX32Binary;
+    break;
+  case Triple::aarch64:
+    result = new MachOARM64Binary;
+    break;
+  case Triple::arm:
+    result = new MachOARMBinary;
+    break;
+  default:
+    delete macho;
+    delete buff;
+    return nullptr;
+  }
+  result->holdBuffer(llvmbin, buff);
+  if (analyze) {
+    result->analyze(llvmbin);
+  }
+  return result;
+}
+
+static Binary *NewPE(object::Binary *llvmbin, MemoryBuffer *buff,
+                     bool analyze) {
+  object::COFFObjectFile *pe = dyn_cast<object::COFFObjectFile>(llvmbin);
+  assert(pe && "must be pe binary");
+  Binary *result = nullptr;
+  switch (pe->getArch()) {
+  case Triple::x86_64:
+    result = new PEX64Binary;
+    break;
+  case Triple::x86:
+    result = new PEX32Binary;
+    break;
+  case Triple::aarch64:
+    result = new PEARM64Binary;
+    break;
+  default:
+    delete pe;
+    delete buff;
+    return nullptr;
+  }
+  result->holdBuffer(llvmbin, buff);
+  if (analyze) {
+    result->analyze(llvmbin);
+  }
+  return result;
+}
+
+static Binary *NewELF(object::Binary *llvmbin, MemoryBuffer *buff,
+                      bool analyze) {
+  object::ELFObjectFileBase *elf = dyn_cast<object::ELFObjectFileBase>(llvmbin);
+  assert(elf && "must be elf binary");
+  Binary *result = nullptr;
+  switch (elf->getArch()) {
+  case Triple::x86_64:
+    result = new ELFX64Binary;
+    break;
+  case Triple::x86:
+    result = new ELFX32Binary;
+    break;
+  case Triple::aarch64:
+    result = new ELFARM64Binary;
+    break;
+  case Triple::arm:
+    result = new ELFARMBinary;
+    break;
+  default:
+    delete elf;
+    delete buff;
+    return nullptr;
+  }
+  result->holdBuffer(llvmbin, buff);
+  if (analyze) {
+    result->analyze(llvmbin);
+  }
+  return result;
+}
+
+Binary *New(const char *path, const char *triple, bool analyze) {
+  auto errOrBuff = MemoryBuffer::getFile(path, -1, false);
+  if (!errOrBuff) {
+    return nullptr;
+  }
+  auto buff = errOrBuff->get();
+  if (*(int *)buff->getBufferStart() == AETHER_FILE_ANA) {
+    Binary *result = new AebiBinary;
+    // no need to hold analyzed buffer
+    result->holdBuffer(nullptr, nullptr);
+    result->analyze(buff->getBufferStart());
+    return result;
+  }
+  file_magic magic = identify_magic(buff->getBuffer());
+  switch (magic) {
+  case file_magic::macho_object:
+  case file_magic::macho_executable:
+  case file_magic::macho_dynamically_linked_shared_lib:
+  case file_magic::macho_bundle:
+  case file_magic::macho_kext_bundle:
+  case file_magic::macho_dynamically_linked_shared_lib_stub:
+  case file_magic::macho_dynamic_linker:
+  case file_magic::macho_preload_executable:
+  case file_magic::coff_object:
+  case file_magic::pecoff_executable:
+  case file_magic::coff_import_library:
+  case file_magic::elf_relocatable:
+  case file_magic::elf_executable:
+  case file_magic::elf_shared_object:
+    break;
+  case file_magic::macho_universal_binary: {
+    Error err = Error::success();
+    object::MachOUniversalBinary fatmacho(MemoryBufferRef(*buff), err);
+    // select the highest arm64 subcpu default
+    uint32_t cpu = MachO::CPU_TYPE_ARM64, subcpu = MachO::CPU_SUBTYPE_ARM64E;
+    if (triple) {
+      if (strstr(triple, "arm64")) {
+        // already inited to highest cpu version
+      } else if (strstr(triple, "x86_64")) {
+        cpu = MachO::CPU_TYPE_X86_64;
+        subcpu = MachO::CPU_SUBTYPE_X86_64_ALL;
+      } else if (strstr(triple, "x86")) {
+        cpu = MachO::CPU_TYPE_X86;
+        subcpu = MachO::CPU_SUBTYPE_X86_ALL;
+      } else {
+        cpu = MachO::CPU_TYPE_ARM;
+        subcpu = MachO::CPU_SUBTYPE_ARM_V7S;
+      }
+    }
+    bool found = false;
+    for (auto &m : fatmacho.objects()) {
+      if (cpu == m.getCPUType()) {
+        if ((uint8_t)subcpu == (uint8_t)m.getCPUSubType()) {
+          found = true;
+          break;
+        }
+      }
+    }
+    // there' no arm64e, turn to arm64
+    if (!found) {
+      subcpu = MachO::CPU_SUBTYPE_ARM64_ALL;
+      for (auto &m : fatmacho.objects()) {
+        if (cpu == m.getCPUType()) {
+          if ((uint8_t)subcpu == (uint8_t)m.getCPUSubType()) {
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!found) {
+      return nullptr;
+    }
+    for (auto &m : fatmacho.objects()) {
+      if (m.getCPUType() == cpu &&
+          (uint8_t)m.getCPUSubType() == (uint8_t)subcpu) {
+        auto machoExp = m.getAsObjectFile();
+        if (!machoExp) {
+          return nullptr;
+        }
+        auto *macho = (MachOBinary *)NewMachO(
+            machoExp.get().release(), errOrBuff.get().release(), analyze);
+        macho->setFileOffset((int)m.getOffset());
+        return macho;
+      }
+    }
+    return nullptr;
+  }
+  default:
+    if (strstr(path, "." AETHER_FILE_EXT)) {
+      SmallVector<llvm_zbuff_t, 102400> uncompbuff;
+#if __APPLE__
+      Error err = zlib::uncompress(
+          buff->getBuffer(), uncompbuff,
+          *(int *)(buff->getBufferStart() + buff->getBufferSize() - 4));
+      if (err) {
+        return nullptr;
+      }
+#else
+      uLongf dstsz =
+          *(int *)(buff->getBufferStart() + buff->getBufferSize() - 4);
+      uncompbuff.resize(dstsz);
+      uncompress((Bytef *)uncompbuff.data(), &dstsz,
+                 (Bytef *)buff->getBufferStart(), buff->getBufferSize() - 4);
+#endif
+      if (*(int *)uncompbuff.data() == AETHER_FILE_ANA) {
+        auto newbuff = MemoryBuffer::getMemBuffer(
+            StringRef((char *)uncompbuff.data(), uncompbuff.size()), "", false);
+
+        Binary *result = new AebiBinary;
+        // no need to hold analyzed buffer
+        result->holdBuffer(nullptr, nullptr);
+        result->analyze(newbuff->getBufferStart());
+        return result;
+      }
+    }
+    Binary *result = new AnyBinary;
+    // no need to hold analyzed buffer
+    result->holdBuffer(nullptr, errOrBuff.get().release());
+    result->analyze(nullptr);
+    return result;
+  }
+
+  MemoryBufferRef buffref(*buff);
+  auto errOrBin = object::createBinary(buffref);
+  if (!errOrBin) {
+    return nullptr;
+  }
+  switch (magic) {
+  case file_magic::macho_object:
+  case file_magic::macho_executable:
+  case file_magic::macho_dynamically_linked_shared_lib:
+  case file_magic::macho_bundle:
+  case file_magic::macho_kext_bundle:
+  case file_magic::macho_dynamically_linked_shared_lib_stub:
+  case file_magic::macho_dynamic_linker:
+  case file_magic::macho_preload_executable:
+    return NewMachO(errOrBin.get().release(), errOrBuff.get().release(),
+                    analyze);
+  case file_magic::coff_object:
+  case file_magic::pecoff_executable:
+  case file_magic::coff_import_library:
+    return NewPE(errOrBin.get().release(), errOrBuff.get().release(), analyze);
+  case file_magic::elf_relocatable:
+  case file_magic::elf_executable:
+  case file_magic::elf_shared_object:
+    return NewELF(errOrBin.get().release(), errOrBuff.get().release(), analyze);
+  default:
+    return nullptr;
+  }
+}
+
+void Delete(Binary *bin) {
+  if (!bin) {
+    return;
+  }
+  delete bin;
+}
+
+void SetAnalyzeCallback(analyze_log_t log, analyze_progress_t prog) {
+  Binary::analyze_log = log;
+  Binary::analyze_progress = prog;
+}
+
+const char *getVersion() { return PROJECT_VERSION_STRING; }
+
+} // namespace aether
