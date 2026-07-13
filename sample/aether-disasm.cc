@@ -67,7 +67,7 @@ int main(int argc, const char *argv[]) {
     std::string opcode;
     for (auto o = i; o < i + opclen; o++)
       opcode += std::format("{:x} ", bytes[o]);
-    std::print("0x{:04x}: {:8} {}", i, opcode, asmcode);
+    std::print("0x{:04x}: {:8} {}\n", i, opcode, asmcode);
     i += opclen;
   }
   return 0;

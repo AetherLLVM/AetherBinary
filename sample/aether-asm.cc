@@ -5,10 +5,31 @@
 
 /*
 Usage: /path/to/icpp aether-asm.cc arch asm-code
-  e.g.: /path/to/icpp aether-asm.cc arm64 "svc #80"
+  e.g.: /path/to/icpp aether-asm.cc arm64 "mov x16, #0; svc #80"
 */
 
 #include "aether-comm.h"
+
+static std::vector<std::string> string_split(std::string_view str,
+                                             std::string_view split) {
+  std::vector<std::string> result;
+  size_t start = 0;
+  size_t end = str.find(split, start);
+  while (end != std::string_view::npos) {
+    // Extract the substring from 'start' to 'end'
+    result.emplace_back(str.substr(start, end - start));
+
+    // Move 'start' past the splitter
+    start = end + split.length();
+
+    // Find the next occurrence of the splitter
+    end = str.find(split, start);
+  }
+  // Add the last part of the string (or the whole string if no splitter was
+  // found)
+  result.emplace_back(str.substr(start));
+  return result;
+}
 
 int main(int argc, const char *argv[]) {
   if (argc < 3) {
@@ -24,11 +45,18 @@ int main(int argc, const char *argv[]) {
     std::print("Failed to initialize the disassembler for {}", argv[1]);
     return -1;
   }
-  unsigned char opcode[20];
-  auto error = diser.assemble(argv[2], opcode);
-  if (error.size()) {
-    std::print("Failed to assemble {}: {}", argv[2], error);
-    return -1;
+  auto insns = string_split(argv[2], ";");
+  for (auto &inst : insns) {
+    unsigned char binopcode[20];
+    auto error = diser.assemble(inst.data(), binopcode);
+    std::string stropcode;
+    if (binopcode[0]) {
+      for (auto o = 1; o < binopcode[0]; o++)
+        stropcode += std::format("{:x} ", binopcode[o]);
+    } else {
+      stropcode = "?? ??";
+    }
+    std::print("{:8} {}\n", stropcode, inst);
   }
   return 0;
 }

@@ -351,7 +351,8 @@ int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
 #endif
 
   cl::ParseCommandLineOptions(argc, argv, "llvm machine code playground\n");
-  const MCTargetOptions MCOptions = mc::InitMCTargetOptionsFromFlags();
+  MCTargetOptions MCOptions = mc::InitMCTargetOptionsFromFlags();
+  MCOptions.ShowMCEncoding = true; // force it to show the opcode we need
   setDwarfDebugFlags(argc, argv);
 
   setDwarfDebugProducer();

@@ -226,6 +226,8 @@ public:
       TripleName = "arm64v8.5a-apple-ios";
       Target = GetTarget(arch, TripleName, false);
     } else {
+      arch = "x86-64"; // reset to x86_64 anyway
+
       Triple triple;
       triple.setArch(Triple::x86_64);
       triple.setVendor(Triple::Apple);
@@ -241,9 +243,9 @@ public:
 
     const char *features = "";
     if (strstr(arch, "arm64") || strstr(arch, "aarch64")) {
-      features = "+aes,+crc,+dotprod,+fp-armv8,+fp16fml,+fullfp16,+lse,+neon,+"
-                 "ras,+rcpc,+rdm,"
-                 "+sha2,+sha3,+v8.1a,+v8.2a,+v8.3a,+v8.4a,+v8.5a,+zcm,+zcz";
+      features =
+          "+aes,+crc,+dotprod,+fp-armv8,+fp16fml,+fullfp16,+lse,+neon,+ras,+"
+          "rcpc,+rdm,+sha2,+sha3,+v8.1a,+v8.2a,+v8.3a,+v8.4a,+v8.5a";
     }
 
     Triple triple(TripleName);
