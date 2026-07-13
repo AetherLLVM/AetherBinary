@@ -51,12 +51,12 @@ int main(int argc, const char *argv[]) {
     auto error = diser.assemble(inst.data(), binopcode);
     std::string stropcode;
     if (binopcode[0]) {
-      for (auto o = 1; o < binopcode[0]; o++)
-        stropcode += std::format("{:x} ", binopcode[o]);
+      for (auto o = 1; o <= binopcode[0]; o++)
+        stropcode += std::format("{:02x} ", binopcode[o]);
     } else {
       stropcode = "?? ??";
     }
-    std::print("{:8} {}\n", stropcode, inst);
+    std::print("{:16} {}\n", stropcode, inst);
   }
   return 0;
 }

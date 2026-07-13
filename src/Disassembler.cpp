@@ -275,11 +275,16 @@ public:
 #endif
 
 #if LLVM_VERSION_MAJOR >= 14
-    const MCTargetOptions MCOptions = mc::InitMCTargetOptionsFromFlags();
+    MCTargetOptions MCOptions = mc::InitMCTargetOptionsFromFlags();
+    MCOptions.ShowMCEncoding = true; // force it to show the opcode we need
+#if LLVM_VERSION_MAJOR >= 22
+    MCOptions.AsmVerbose = true;
+#endif
     MCCTX = new MCContext(triple, MAI, MRI, STI, &SrcMgr, &MCOptions);
     MOFI = Target->createMCObjectFileInfo(*MCCTX, true, true);
     MCCTX->setObjectFileInfo(MOFI);
 #else
+    MCTargetOptions MCOptions;
     MCCTX = new MCContext(MAI, MRI, &MOFI);
     MOFI.InitMCObjectFileInfo(triple, true, *MCCTX);
 #endif
@@ -294,9 +299,8 @@ public:
         Target->createMCInstPrinter(Triple(TripleName), 0, *MAI, *MII, *MRI);
     Printer->setPrintImmHex(true);
 
-    MCTargetOptions opt;
     std::unique_ptr<MCAsmBackend> MAB(
-        Target->createMCAsmBackend(*STI, *MRI, opt));
+        Target->createMCAsmBackend(*STI, *MRI, MCOptions));
 #if LLVM_VERSION_MAJOR >= 17
     std::unique_ptr<MCCodeEmitter> MCE(
         Target->createMCCodeEmitter(*MII, *MCCTX));
