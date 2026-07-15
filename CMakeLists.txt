@@ -15,6 +15,9 @@ include(CMakePackageConfigHelpers)
 
 set(PROJECT_VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}")
 
+# find the dependent LLVM package, which is built in the previous step
+find_package(LLVM CONFIG REQUIRED)
+
 configure_file(
   "${CMAKE_SOURCE_DIR}/include/Version.h.in"
   "${CMAKE_BINARY_DIR}/generated/Version.h"
@@ -51,16 +54,19 @@ set(SOURCE_FILES
   src/Disassembler.cpp
 )
 
-# find the dependent LLVM package, which is built in the previous step
-find_package(LLVM CONFIG REQUIRED)
-
 add_library(AetherBinary SHARED
   ${SOURCE_FILES}
   ${HEADER_FILES}
 )
 
 # link the LLVM shared library
-target_link_libraries(AetherBinary PRIVATE LLVM)
+if(MSVC)
+  target_link_directories(AetherBinary PRIVATE ${LLVM_LIBRARY_DIRS})
+  target_link_libraries(AetherBinary PRIVATE LLVM-22 LLVMSupport)
+else()
+  target_link_libraries(AetherBinary PRIVATE LLVM)
+endif()
+
 target_include_directories(AetherBinary PRIVATE 
   ${LLVM_INCLUDE_DIRS}
   ${LLVM_BUILD_DIR}/include
@@ -85,16 +91,29 @@ target_include_directories(AetherBinary PUBLIC
   $<INSTALL_INTERFACE:include>
 )
 
+if(MSVC)
+  set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  add_subdirectory(${CMAKE_SOURCE_DIR}/third/zlib
+                   ${CMAKE_BINARY_DIR}/zlib
+                   EXCLUDE_FROM_ALL)
+
+  target_link_libraries(AetherBinary PRIVATE zlibstatic)
+  add_dependencies(AetherBinary zlibstatic)
+
+  target_compile_options(AetherBinary PRIVATE 
+    # /EHsc enables standard synchronous C++ exception handling
+    /EHsc)
+
+  set(DISABLE_RTTI /GR-)
+else()
+  set(DISABLE_RTTI -fno-rtti)
+endif()
+
 target_compile_options(AetherBinary PRIVATE
-  -Wall
-  -Wextra
-  -Werror
-  -Wno-unused-parameter
-  -Wno-unused-variable
-  -Wno-unused-function
-  -Wno-unused-private-field
-  -Wno-missing-field-initializers
-  -fno-rtti
+  -DAETHER_DLLIMPL=1
+
+  ${DISABLE_RTTI}
 )
 target_compile_features(AetherBinary PUBLIC cxx_std_20)
 
@@ -142,4 +161,20 @@ install(FILES
   "${CMAKE_BINARY_DIR}/generated/AetherBinaryConfig.cmake"
   "${CMAKE_BINARY_DIR}/generated/AetherBinaryConfigVersion.cmake"
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/AetherBinary
+)
+
+if(MSVC)
+  set(LIBLLVM "LLVM-22.dll")
+  set(LIBLLVMDIR ${LLVM_TOOLS_BINARY_DIR})
+elseif(APPLE)
+  set(LIBLLVM "libLLVM.dylib")
+  set(LIBLLVMDIR ${LLVM_LIBRARY_DIRS})
+else()
+  set(LIBLLVM "libLLVM.so")
+  set(LIBLLVMDIR ${LLVM_LIBRARY_DIRS})
+endif()
+
+install(FILES
+  ${LIBLLVMDIR}/${LIBLLVM}
+  DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

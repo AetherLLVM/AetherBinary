@@ -460,7 +460,7 @@ bool MachOBinary::analyze(const void *llvmbin) {
           address += offset;
           if (m_funcs.find(address) == m_funcs.end()) {
             char name[36];
-            snprintf(name, sizeof(name), AETHER_ANOYPREFIX "%lx", address);
+            snprintf(name, sizeof(name), AETHER_ANOYPREFIX ADDRFMT, address);
             auto &newfunc = m_funcs.insert(std::make_pair(address, Function()))
                                 .first->second;
             newfunc.start = address;
@@ -504,7 +504,7 @@ bool MachOBinary::analyze(const void *llvmbin) {
         if (ptr[i]) {
           auto addr = imageBase() + ptr[i];
           char name[36];
-          snprintf(name, sizeof(name), AETHER_ANOYPREFIX "%lx", addr);
+          snprintf(name, sizeof(name), AETHER_ANOYPREFIX ADDRFMT, addr);
           auto &newfunc =
               m_funcs.insert(std::make_pair(addr, Function())).first->second;
           newfunc.start = addr;
@@ -533,7 +533,7 @@ void MachOBinary::parseSwiftFunctions() {
     if (addr % 4)
       return;
     char name[36];
-    snprintf(name, sizeof(name), AETHER_ANOYPREFIX "swift_%lx", addr);
+    snprintf(name, sizeof(name), AETHER_ANOYPREFIX "swift_" ADDRFMT, addr);
     auto &newfunc =
         m_funcs.insert(std::make_pair(addr, Function())).first->second;
     newfunc.start = addr;

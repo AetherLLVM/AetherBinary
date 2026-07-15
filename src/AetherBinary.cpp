@@ -51,6 +51,7 @@ using namespace llvm::compression;
 #endif
 #include <llvm/Support/MemoryBuffer.h>
 
+#include <format>
 #include <iostream>
 
 #include "AetherBinaryPriv.hpp"

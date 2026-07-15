@@ -22,48 +22,115 @@ namespace fs = std::filesystem;
 #if 1 // change to 0 to only print the command without executing it.
 #define command(fmt, ...) std::system(std::format(fmt, __VA_ARGS__).c_str())
 #else
-#define command(fmt, ...)                                                      \
-  {                                                                            \
-    std::print(fmt, __VA_ARGS__);                                              \
-    std::print("\n");                                                          \
+#define command(fmt, ...) std::println(fmt, __VA_ARGS__);
+#endif
+
+#if _WIN32
+#define EXTRA_CMAKE                                                            \
+  " -DCMAKE_C_COMPILER=clang-cl -DCMAKE_CXX_COMPILER=clang-cl "
+
+bool patch_string(std::string_view infile, std::string_view pattern,
+                  std::string_view replace) {
+  std::stringstream buffer;
+  {
+    // read file
+    buffer << std::ifstream(fs::path(infile), std::ios::in | std::ios::binary)
+                  .rdbuf();
   }
+
+  std::string_view patch_magic =
+      "/* Patched by AetherBinary to link the LLVM.dll */\n";
+  std::string content = buffer.str();
+  if (content.starts_with(patch_magic))
+    return false;
+
+  size_t pos = 0;
+  while ((pos = content.find(pattern, pos)) != std::string::npos) {
+    // do the replacement
+    content.replace(pos, pattern.length(), replace);
+    pos += replace.length();
+  }
+
+  fs::path temp_file = infile;
+  temp_file.replace_extension(".tmp");
+  {
+    // write file
+    std::ofstream outf(temp_file,
+                       std::ios::out | std::ios::binary | std::ios::trunc);
+    outf.write(patch_magic.data(), patch_magic.size());
+    outf.write(content.data(), content.size());
+  }
+
+  // rename the temp as the original file
+  fs::rename(temp_file, infile);
+  return true;
+}
+
+#else
+#define EXTRA_CMAKE ""
 #endif
 
 // quote the path with double quotes, to avoid issues with spaces in the path.
 std::string dqpath(const fs::path &p, const fs::path &child = "") {
-  return "\"" + (p / child).string() + "\"";
+  return "\"" + (child.empty() ? p : p / child).string() + "\"";
 }
 
 int main(int argc, const char *argv[]) {
   auto script_path = fs::absolute(argv[0]);
-  std::print("Running build script {}...\n", script_path.string());
+  std::println("Running build script {}...", script_path.string());
 
   auto script_dir = script_path.parent_path();
 
-  std::print("Phase 1: Build LLVM...\n");
+  std::println("Phase 1: Build LLVM...");
+
   auto llvm_build_dir = script_dir / "build-llvm";
   auto llvm_cmake_dir = script_dir / "cmake" / "llvm";
-  command("cmake -S {} -B {} -G Ninja", dqpath(llvm_cmake_dir),
-          dqpath(llvm_build_dir));
-  command("cmake --build {} --target install -- -j8", dqpath(llvm_build_dir));
+  if (fs::exists(llvm_build_dir / "install")) {
+    std::println("LLVM has already been built and installed.");
+  } else {
+#if _WIN32
+    const char *llvm_include = "/third/llvm-project/llvm/include/llvm/";
+    // AetherBinary links to LLVM.dll, these headers will cause problem
+    // on Windows with linkage issues, so we remove its LLVM_ABI attribute
+    // before building...
+    const char *target_files[]{"ADT/SmallVector.h",
+                               "ExecutionEngine/Orc/BacktraceTools.h"};
+    for (auto target : target_files) {
+      auto targetfile = script_dir.string() + llvm_include + target;
+      std::print("Patching LLVM_ABI declaration in {}...\n", target);
+      if (patch_string(targetfile, " LLVM_ABI ", " /*LLVM_ABI*/ "))
+        std::println("Finished patching.");
+      else
+        std::println("Ignored, it's already been patched.");
+    }
+#endif
+    command("cmake -S {} -B {} -G Ninja" EXTRA_CMAKE, dqpath(llvm_cmake_dir),
+            dqpath(llvm_build_dir));
+    command("cmake --build {} --target install", dqpath(llvm_build_dir));
+  }
 
-  std::print("Phase 2: Build AetherBinary...\n");
+  std::println("Phase 2: Build AetherBinary...");
+
   auto build_type = "Release";
   if (argc > 1) {
     build_type = argv[1];
+#if _WIN32
+    build_type = "RelWithDebInfo";
+#endif
   }
+
   auto aether_binary_build_dir =
       script_dir / (std::string("build") + "-" + build_type);
-  command(
-      "cmake -S {} -B {} -G Ninja -DCMAKE_BUILD_TYPE={} "
-      "-DCMAKE_PREFIX_PATH={} -DCMAKE_INSTALL_PREFIX={} -DLLVM_BUILD_DIR={}",
-      dqpath(script_dir), dqpath(aether_binary_build_dir), build_type,
-      dqpath(llvm_build_dir, "install"),
-      dqpath(aether_binary_build_dir, "install"),
-      dqpath(llvm_build_dir, "llvm"));
-  command("cmake --build {} --target install -- -j8",
-          dqpath(aether_binary_build_dir));
+  if (!fs::exists(aether_binary_build_dir))
+    command("cmake -S {} -B {} -G Ninja -DCMAKE_BUILD_TYPE={} "
+            "-DCMAKE_PREFIX_PATH={} -DCMAKE_INSTALL_PREFIX={} "
+            "-DLLVM_BUILD_DIR={}" EXTRA_CMAKE,
+            dqpath(script_dir), dqpath(aether_binary_build_dir), build_type,
+            dqpath(llvm_build_dir, "install"),
+            dqpath(aether_binary_build_dir, "install"),
+            dqpath(llvm_build_dir, "llvm"));
+  command("cmake --build {} --target install", dqpath(aether_binary_build_dir));
 
-  std::print("Build completed.\n");
+  std::println("Build completed.");
   return 0;
 }

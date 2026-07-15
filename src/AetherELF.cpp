@@ -599,7 +599,7 @@ Function *ELFBinary::getOrInsertFunction(addr_t addr, const char *name,
       found->second.name = name;
     } else {
       char tmpname[32];
-      snprintf(tmpname, sizeof(tmpname), AETHER_ANOYPREFIX "%lx", start);
+      snprintf(tmpname, sizeof(tmpname), AETHER_ANOYPREFIX ADDRFMT, start);
       found->second.name = tmpname;
     }
   } else {

@@ -15,6 +15,10 @@
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Path.h>
 
+#if defined(_WIN32)
+#include <Windows.h>
+#endif
+
 #define obj ((object::COFFObjectFile *)llvmbin)
 
 using namespace llvm;
