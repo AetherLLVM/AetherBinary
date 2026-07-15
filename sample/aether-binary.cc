@@ -14,7 +14,7 @@ binary file as a C++ source file, which will fail the whole command running.
 
 int main(int argc, const char *argv[]) {
   if (argc < 2) {
-    std::print("Usage: {} /path/to/binary\n", argv[0]);
+    std::println("Usage: {} /path/to/binary", argv[0]);
     return 1;
   }
   // load LLVM and AetherBinary libraries, so we can use their APIs directly
@@ -24,7 +24,7 @@ int main(int argc, const char *argv[]) {
   // load and dump the input binary file
   auto bin = aether::New(argv[1]);
   if (!bin) {
-    std::print("Failed to parse {}", argv[1]);
+    std::println("Failed to parse {}", argv[1]);
     return -1;
   }
   bin->dump();

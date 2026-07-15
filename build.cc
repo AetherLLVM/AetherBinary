@@ -66,6 +66,16 @@ bool patch_string(std::string_view infile, std::string_view pattern,
   return true;
 }
 
+// AetherBinary links to LLVM.dll, the LLVM_ABI will cause problem
+// on Windows with linkage issues, so we remove its LLVM_ABI attribute
+// before building or after installing...
+void patch_file(std::string_view file) {
+  std::println("Patching LLVM_ABI declaration in {}...", file);
+  if (patch_string(file, " LLVM_ABI ", " /*LLVM_ABI*/ "))
+    std::println("Finished patching.");
+  else
+    std::println("Ignored, it's already been patched.");
+}
 #else
 #define EXTRA_CMAKE ""
 #endif
@@ -85,28 +95,24 @@ int main(int argc, const char *argv[]) {
 
   auto llvm_build_dir = script_dir / "build-llvm";
   auto llvm_cmake_dir = script_dir / "cmake" / "llvm";
-  if (fs::exists(llvm_build_dir / "install")) {
+  auto llvm_install_dir = llvm_build_dir / "install";
+  if (fs::exists(llvm_install_dir)) {
     std::println("LLVM has already been built and installed.");
   } else {
 #if _WIN32
-    const char *llvm_include = "/third/llvm-project/llvm/include/llvm/";
-    // AetherBinary links to LLVM.dll, these headers will cause problem
-    // on Windows with linkage issues, so we remove its LLVM_ABI attribute
-    // before building...
-    const char *target_files[]{"ADT/SmallVector.h",
-                               "ExecutionEngine/Orc/BacktraceTools.h"};
-    for (auto target : target_files) {
-      auto targetfile = script_dir.string() + llvm_include + target;
-      std::print("Patching LLVM_ABI declaration in {}...\n", target);
-      if (patch_string(targetfile, " LLVM_ABI ", " /*LLVM_ABI*/ "))
-        std::println("Finished patching.");
-      else
-        std::println("Ignored, it's already been patched.");
-    }
+    // pre-build patch
+    patch_file(script_dir.string() + "/third/llvm-project/llvm/include/llvm/"
+                                     "ExecutionEngine/Orc/BacktraceTools.h");
 #endif
+
     command("cmake -S {} -B {} -G Ninja" EXTRA_CMAKE, dqpath(llvm_cmake_dir),
             dqpath(llvm_build_dir));
     command("cmake --build {} --target install", dqpath(llvm_build_dir));
+
+#if _WIN32
+    // post-install patch
+    patch_file(llvm_install_dir.string() + "/include/llvm/ADT/SmallVector.h");
+#endif
   }
 
   std::println("Phase 2: Build AetherBinary...");

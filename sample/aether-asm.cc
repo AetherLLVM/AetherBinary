@@ -33,7 +33,7 @@ static std::vector<std::string> string_split(std::string_view str,
 
 int main(int argc, const char *argv[]) {
   if (argc < 3) {
-    std::print("Usage: {} arm64|arm|thumb|x86|x86_64 asm-code\n", argv[0]);
+    std::println("Usage: {} arm64|arm|thumb|x86|x86_64 asm-code", argv[0]);
     return 1;
   }
   // load LLVM and AetherBinary libraries, so we can use their APIs directly
@@ -42,7 +42,7 @@ int main(int argc, const char *argv[]) {
 
   aether::Disassembler diser(argv[1]);
   if (!diser.ready()) {
-    std::print("Failed to initialize the disassembler for {}", argv[1]);
+    std::println("Failed to initialize the disassembler for {}", argv[1]);
     return -1;
   }
   auto insns = string_split(argv[2], ";");
@@ -56,7 +56,7 @@ int main(int argc, const char *argv[]) {
     } else {
       stropcode = "?? ??";
     }
-    std::print("{:16} {}\n", stropcode, inst);
+    std::println("{:16} {}", stropcode, inst);
   }
   return 0;
 }

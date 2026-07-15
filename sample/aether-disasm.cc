@@ -13,7 +13,7 @@ Usage: /path/to/icpp aether-disasm.cc arch hex-byte-string
 static std::vector<uint8_t> hex_to_bytes(std::string_view hex) {
   std::vector<uint8_t> bytes;
   if (hex.length() % 2 != 0) {
-    std::print("Hex string must have an even length.");
+    std::println("Hex string must have an even length.");
     return bytes;
   }
   bytes.reserve(hex.length() / 2);
@@ -25,7 +25,7 @@ static std::vector<uint8_t> hex_to_bytes(std::string_view hex) {
       return ch - 'A' + 10;
     if (ch >= 'a' && ch <= 'f')
       return ch - 'a' + 10;
-    std::print("Invalid character found in hex string: {}", ch);
+    std::println("Invalid character found in hex string: {}", ch);
     return 0;
   };
 
@@ -40,8 +40,8 @@ static std::vector<uint8_t> hex_to_bytes(std::string_view hex) {
 
 int main(int argc, const char *argv[]) {
   if (argc < 3) {
-    std::print("Usage: {} arm64|arm|thumb|x86|x86_64 hex-byte-string\n",
-               argv[0]);
+    std::println("Usage: {} arm64|arm|thumb|x86|x86_64 hex-byte-string",
+                 argv[0]);
     return 1;
   }
   // load LLVM and AetherBinary libraries, so we can use their APIs directly
@@ -50,7 +50,7 @@ int main(int argc, const char *argv[]) {
 
   aether::Disassembler diser(argv[1]);
   if (!diser.ready()) {
-    std::print("Failed to initialize the disassembler for {}", argv[1]);
+    std::println("Failed to initialize the disassembler for {}", argv[1]);
     return -1;
   }
   auto bytes = hex_to_bytes(argv[2]);
@@ -61,13 +61,13 @@ int main(int argc, const char *argv[]) {
     std::string asmcode;
     auto opclen = diser.disassemble(&bytes[i], bytes.size() - i, asmcode);
     if (!opclen) {
-      std::print("Failed to disassemble at offset 0x{:x}: {}", i, asmcode);
+      std::println("Failed to disassemble at offset 0x{:x}: {}", i, asmcode);
       return -1;
     }
     std::string opcode;
     for (auto o = i; o < i + opclen; o++)
       opcode += std::format("{:x} ", bytes[o]);
-    std::print("0x{:04x}: {:16} {}\n", i, opcode, asmcode);
+    std::println("0x{:04x}: {:16} {}", i, opcode, asmcode);
     i += opclen;
   }
   return 0;
