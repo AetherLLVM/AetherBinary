@@ -138,7 +138,7 @@ int main(int argc, const char *argv[]) {
 
   auto aether_binary_build_dir =
       script_dir / (std::string("build") + "-" + build_type);
-  if (!fs::exists(aether_binary_build_dir))
+  if (!fs::exists(aether_binary_build_dir / "build.ninja"))
     command("cmake -S {} -B {} -G Ninja -DCMAKE_BUILD_TYPE={} "
             "-DCMAKE_PREFIX_PATH={} -DCMAKE_INSTALL_PREFIX={} "
             "-DLLVM_BUILD_DIR={} -DICPP_INSTALL_DIR={}" EXTRA_CMAKE,

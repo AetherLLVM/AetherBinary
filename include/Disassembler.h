@@ -18,13 +18,14 @@ class raw_ostream;
 
 namespace aether {
 
-typedef bool (*Symbolizer)(void *context, llvm::MCInst &inst,
-                           llvm::raw_ostream &os, unsigned long long addr,
-                           unsigned long long value, int instlen, bool branch);
+typedef bool (*Symbolizer_t)(void *context, llvm::MCInst &inst,
+                             llvm::raw_ostream &os, unsigned long long addr,
+                             unsigned long long value, int instlen,
+                             bool branch);
 
 class __AETHER_API__ Disassembler {
 public:
-  static Symbolizer Symbolizer;
+  static Symbolizer_t Symbolizer;
   static void *Symcontext;
 
 public:
@@ -94,7 +95,7 @@ private:
 
 class Disymboler {
 public:
-  Disymboler(void *ctx, Symbolizer callback) {
+  Disymboler(void *ctx, Symbolizer_t callback) {
     Disassembler::Symbolizer = callback;
     Disassembler::Symcontext = ctx;
   }

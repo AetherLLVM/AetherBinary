@@ -52,7 +52,7 @@ int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx);
 
 namespace aether {
 
-Symbolizer Disassembler::Symbolizer = NULL;
+Symbolizer_t Disassembler::Symbolizer = NULL;
 void *Disassembler::Symcontext = NULL;
 
 static const Target *GetTarget(const char *ArchName, std::string &TripleName,
@@ -190,7 +190,7 @@ public:
 
 struct DisassemblerContext {
   std::string TripleName;
-  const Target *Target;
+  const llvm::Target *Target;
 
   MCRegisterInfo *MRI;
   MCAsmInfo *MAI;

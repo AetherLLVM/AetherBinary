@@ -51,7 +51,13 @@ using namespace llvm::compression;
 #endif
 #include <llvm/Support/MemoryBuffer.h>
 
+#if __linux__
+namespace std {
+std::string format(std::string_view fmt, ...) { return fmt.data(); }
+} // namespace std
+#else
 #include <format>
+#endif
 #include <iostream>
 
 #include "AetherBinaryPriv.hpp"

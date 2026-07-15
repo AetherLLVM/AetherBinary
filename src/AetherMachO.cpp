@@ -489,7 +489,7 @@ bool MachOBinary::analyze(const void *llvmbin) {
         if (ptr[i]) {
           auto addr = imageBase() + (ptr[i] & 0xFFFFFFFF);
           char name[36];
-          snprintf(name, sizeof(name), AETHER_ANOYPREFIX "%llx", addr);
+          snprintf(name, sizeof(name), AETHER_ANOYPREFIX ADDRFMT, addr);
           auto &newfunc =
               m_funcs.insert(std::make_pair(addr, Function())).first->second;
           newfunc.start = addr;

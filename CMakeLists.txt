@@ -47,7 +47,7 @@ set(HEADER_FILES
   include/CommDef.h
   include/Disassembler.h
   src/AetherBinaryPriv.hpp
-  src/MachoTrie.hpp
+  src/MachOTrie.hpp
 )
 
 set(SOURCE_FILES
