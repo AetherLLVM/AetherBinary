@@ -14,6 +14,17 @@ endif()
 
 project(AetherBinary)
 
+# setup to use icpp's C++ runtime
+if(MSVC)
+  set(LLVM_ENABLE_EH TRUE)
+  set(LLVM_ENABLE_RTTI TRUE)
+  add_compile_options("/clang:-nostdinc++" "/clang:-nostdlib++" 
+    "-I${ICPP_INSTALL_DIR}/include/c++/v1" /EHsc
+  )
+  link_directories("${ICPP_INSTALL_DIR}/lib")
+  add_link_options("/nodefaultlib:msvcprt.lib" c++.lib) 
+endif()
+
 # enable targets which remill supports even though AetherBinary doesn't support Sparc yet
 set(LLVM_TARGETS_TO_BUILD "X86;ARM;AArch64;Sparc" CACHE STRING "" FORCE)
 

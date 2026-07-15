@@ -18,6 +18,15 @@ set(PROJECT_VERSION_STRING "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${
 # find the dependent LLVM package, which is built in the previous step
 find_package(LLVM CONFIG REQUIRED)
 
+# setup to use icpp's C++ runtime
+if(MSVC)
+  add_compile_options("/clang:-nostdinc++" "/clang:-nostdlib++" 
+    "-I${ICPP_INSTALL_DIR}/include/c++/v1"
+  )
+  link_directories("${ICPP_INSTALL_DIR}/lib")
+  add_link_options("/nodefaultlib:msvcprt.lib" c++.lib) 
+endif()
+
 configure_file(
   "${CMAKE_SOURCE_DIR}/include/Version.h.in"
   "${CMAKE_BINARY_DIR}/generated/Version.h"

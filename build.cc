@@ -15,7 +15,7 @@ Usage:
   the log of the building process can be found in OUTOUT panel of ICPP channel.
 */
 
-import std;
+#include <icpp.hpp>
 
 namespace fs = std::filesystem;
 
@@ -86,6 +86,7 @@ std::string dqpath(const fs::path &p, const fs::path &child = "") {
 }
 
 int main(int argc, const char *argv[]) {
+  auto icpp_dir = fs::path(icpp::program()).parent_path().parent_path();
   auto script_path = fs::absolute(argv[0]);
   std::println("Running build script {}...", script_path.string());
 
@@ -105,8 +106,18 @@ int main(int argc, const char *argv[]) {
                                      "ExecutionEngine/Orc/BacktraceTools.h");
 #endif
 
-    command("cmake -S {} -B {} -G Ninja" EXTRA_CMAKE, dqpath(llvm_cmake_dir),
-            dqpath(llvm_build_dir));
+    command("cmake -S {} -B {} -G Ninja -DICPP_INSTALL_DIR={}" EXTRA_CMAKE,
+            dqpath(llvm_cmake_dir), dqpath(llvm_build_dir), dqpath(icpp_dir));
+
+#if _WIN32
+    // link icpp's c++.dll, so that llvm's table-gen can run normally
+    auto dstcpp = llvm_build_dir / "llvm/bin/c++.dll";
+    if (!fs::exists(dstcpp)) {
+      std::println("Created symlink {}.", dstcpp.string());
+      command("mklink {} {}", dqpath(dstcpp), dqpath(icpp_dir / "lib/c++.dll"));
+    }
+#endif
+
     command("cmake --build {} --target install", dqpath(llvm_build_dir));
 
 #if _WIN32
@@ -130,11 +141,11 @@ int main(int argc, const char *argv[]) {
   if (!fs::exists(aether_binary_build_dir))
     command("cmake -S {} -B {} -G Ninja -DCMAKE_BUILD_TYPE={} "
             "-DCMAKE_PREFIX_PATH={} -DCMAKE_INSTALL_PREFIX={} "
-            "-DLLVM_BUILD_DIR={}" EXTRA_CMAKE,
+            "-DLLVM_BUILD_DIR={} -DICPP_INSTALL_DIR={}" EXTRA_CMAKE,
             dqpath(script_dir), dqpath(aether_binary_build_dir), build_type,
             dqpath(llvm_build_dir, "install"),
             dqpath(aether_binary_build_dir, "install"),
-            dqpath(llvm_build_dir, "llvm"));
+            dqpath(llvm_build_dir, "llvm"), dqpath(icpp_dir));
   command("cmake --build {} --target install", dqpath(aether_binary_build_dir));
 
   std::println("Build completed.");
