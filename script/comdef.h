@@ -36,5 +36,6 @@ static bool load_libraries(std::string_view script_file,
       return false;
     }
   }
+  aether::setAnalyzeCallback(log_print, nullptr);
   return true;
 }

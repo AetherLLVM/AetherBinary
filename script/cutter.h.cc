@@ -15,7 +15,7 @@ int main(int argc, const char *argv[]) {
   }
   // set Cutter++'s log function
   auto log_print = (aether::analyze_log_t)std::strtoull(argv[2], nullptr, 16);
-  aether::setAnalyzeCallback(log_print, nullptr);
+  log_print("AetherBinary's analyzing %s...", argv[1]);
 
   // load LLVM and AetherBinary dynamically, after this icpp can resolve symbols
   // for us
