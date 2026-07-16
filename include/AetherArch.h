@@ -27,7 +27,7 @@ public:
                    Binary *bin, bool thumb = false,
                    std::set<addr_t> *datas = nullptr);
 
-  virtual int defaultConsume() = 0;
+  virtual int defaultSize() = 0;
   virtual bool isCallReg(void *llvminst) = 0;
   virtual bool isCallMem(void *llvminst) = 0;
   virtual bool isCallPcrel(void *llvminst) = 0;
@@ -51,7 +51,7 @@ public:
   MachineX86() { m_arch = X86_64; }
   virtual ~MachineX86() {}
 
-  virtual int defaultConsume() { return 1; }
+  virtual int defaultSize() { return 1; }
 
   virtual bool isCallReg(void *llvminst);
   virtual bool isCallMem(void *llvminst);
@@ -68,7 +68,7 @@ public:
   MachineARM64() { m_arch = ARM64; }
   virtual ~MachineARM64() {}
 
-  virtual int defaultConsume() { return 4; }
+  virtual int defaultSize() { return 4; }
 
   virtual bool isCallReg(void *llvminst);
   virtual bool isCallMem(void *llvminst);
@@ -86,7 +86,7 @@ public:
   MachineARM() { m_arch = ARM; }
   virtual ~MachineARM() {}
 
-  virtual int defaultConsume() { return 4; }
+  virtual int defaultSize() { return 4; }
 
   virtual bool isCallReg(void *llvminst);
   virtual bool isCallMem(void *llvminst);

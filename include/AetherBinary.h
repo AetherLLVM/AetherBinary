@@ -40,9 +40,10 @@ public:
   bool valid() const;
   bool load(const char *dbpath);
   bool save(const char *dbpath, bool compress = false);
-  void dump();
-  const char *triple(bool thumb) const;
-  const char *arch(bool thumb) const;
+  void dump() const;
+  void dump(addr_t start, addr_t end = 0) const;
+  const char *triple(bool thumb = false) const;
+  const char *arch(bool thumb = false) const;
 
   void holdBuffer(void *llvmbin, void *filebuff);
 
@@ -53,10 +54,11 @@ public:
 
   ArchType archType() const { return m_archtype; }
   const char *archTypeString() const;
+  int defaultInsnSize() const;
 
-  Disassembler *diser() { return m_diser; }
+  Disassembler *diser() const { return m_diser; }
 
-  Disassembler *diserThumb() { return m_diserthumb; }
+  Disassembler *diserThumb() const { return m_diserthumb; }
 
   unsigned fileHash() const { return m_filehash; }
 

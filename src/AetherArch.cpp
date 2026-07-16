@@ -52,7 +52,7 @@ void Machine::analyzeFunc(bool hasfnstarts, Disassembler *diser,
                                       inst, addr);
     if (consumed == 0) {
       lastitype = IDATA;
-      addr += defaultConsume();
+      addr += defaultSize();
       continue;
     }
     if (lastitype != NORMAL) {
@@ -252,7 +252,7 @@ void Machine::analyzeFunc(Disassembler *diser, bool isobj, const char *opbuff,
         hitret = true;
         continue;
       }
-      consumed = defaultConsume();
+      consumed = defaultSize();
       iinfo.info.type = IDATA;
       inst.setOpcode(-1);
     } else {

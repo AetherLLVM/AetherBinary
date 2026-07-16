@@ -51,13 +51,7 @@ using namespace llvm::compression;
 #endif
 #include <llvm/Support/MemoryBuffer.h>
 
-#if __linux__
-namespace std {
-std::string format(std::string_view fmt, ...) { return fmt.data(); }
-} // namespace std
-#else
 #include <format>
-#endif
 #include <iostream>
 
 #include "AetherBinaryPriv.hpp"
@@ -92,7 +86,13 @@ analyze_progress_t Binary::analyze_progress = [](const char *prefix, int cur,
     }
     tmp = prog;
 
-    analyze_log("%s (%d%%)...\n", prefix, prog);
+    analyze_log("%s (%d%%)...\r", prefix, prog);
+    if (prog == 100)
+      analyze_log("%128s\r", " ");
+    if (analyze_log == (analyze_log_t)::printf ||
+        analyze_log == (analyze_log_t)std::printf) {
+      std::fflush(stdout);
+    }
   }
 };
 
@@ -607,14 +607,32 @@ const char *Binary::archTypeString() const {
   }
 }
 
-void Binary::dump() {
+int Binary::defaultInsnSize() const {
+  switch (m_archtype) {
+  case ARMV5TE:
+  case ARM: {
+    MachineARM arch;
+    return arch.defaultSize();
+  }
+  case ARM64: {
+    MachineARM64 arch;
+    return arch.defaultSize();
+  }
+  default: {
+    MachineX86 arch;
+    return arch.defaultSize();
+  }
+  }
+}
+
+void Binary::dump() const {
   printf("file type : %d\n"
          "arch type : %d\n"
          "base addr : " ADDRFMT "\n"
          "sections : {\n",
          m_filetype, m_archtype, m_baseaddr);
   for (auto &it : m_sects) {
-    Section &sect = it.second;
+    auto &sect = it.second;
     printf("\t%s = {\n"
            "\t\ttype : %d\n"
            "\t\taddr : " ADDRFMT "\n"
@@ -625,7 +643,7 @@ void Binary::dump() {
   }
   printf("}\nfunctions[%ld] : {\n", m_funcs.size());
   for (auto &it : m_funcs) {
-    Function &func = it.second;
+    auto &func = it.second;
     printf("\t%s = {\n"
            "\t\tstart : " ADDRFMT "\n"
            "\t\tend   : " ADDRFMT "\n"
@@ -657,6 +675,61 @@ void Binary::dump() {
     printf("\t\t}\n\t}\n");
   }
   printf("}\n");
+}
+
+void Binary::dump(addr_t start, addr_t end) const {
+  if (!end)
+    end = start + 1;
+
+  auto sect = addrSect(start);
+  const Function *func = nullptr;
+  if (!sect) {
+    analyze_log("%s\n",
+                std::format("Invalid dump address 0x{:x}", start).c_str());
+    return;
+  }
+
+  auto sectbuff = addrBuff(start);
+  analyze_log("%s\n", std::format("Section {}:", sect->name).c_str());
+  for (auto addr = start; addr < end;) {
+    if (addr >= sect->addr + sect->size) {
+      sect = addrSect(addr);
+      if (!sect)
+        break;
+      sectbuff = addrBuff(addr);
+      analyze_log("%s\n", std::format("Section {}:", sect->name).c_str());
+    }
+    auto buff = sectbuff + addr - sect->addr;
+    if (sect->type == TEXT) {
+      if (!func || addr >= func->end) {
+        func = addrFunc(addr);
+        analyze_log("%s\n", std::format("Function {}:", func->name).c_str());
+      }
+      std::string insn;
+      auto oplen = diser()->disassemble((unsigned char *)buff, 16, insn);
+      if (!oplen) {
+        oplen = defaultInsnSize();
+        insn = "???";
+      }
+      std::string hex;
+      for (auto bptr = (uint8_t *)buff, bend = bptr + oplen; bptr < bend;
+           bptr++) {
+        hex += std::format("{:02x} ", *bptr);
+      }
+      analyze_log("%s\n",
+                  std::format("{:09x} {:16} {}", addr, hex, insn).c_str());
+      addr += oplen;
+    } else {
+      const int oplen = 16;
+      std::string hex;
+      for (auto bptr = (uint8_t *)buff, bend = bptr + oplen; bptr < bend;
+           bptr++) {
+        hex += std::format("{:02x} ", *bptr);
+      }
+      analyze_log("%s\n", std::format("{:09x} {:16}", addr, hex).c_str());
+      addr += oplen;
+    }
+  }
 }
 
 const char *Binary::arch(bool thumb) const {

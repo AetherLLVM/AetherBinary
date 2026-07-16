@@ -52,20 +52,24 @@ enum InsnType {
   TRAP,
 };
 
-struct Section {
+struct __AETHER_API__ Section {
   std::string name;
   SectType type;
   size_t foff;
   size_t size;
   addr_t addr;
+
+  void dump() const;
 };
 typedef std::map<addr_t, Section> Sections;
 typedef std::map<addr_t, const char *> SectionBuffs;
 
-struct Import {
+struct __AETHER_API__ Import {
   std::string name;
   size_t foff; // got/lazyptr fileoff
   int lib;
+
+  void dump() const;
 };
 typedef std::vector<Import> Imports;
 
@@ -173,6 +177,8 @@ struct __AETHER_API__ Function {
     flags = F.flags; // MFF_xxx
     return *this;
   }
+
+  void dump() const;
 };
 typedef std::map<addr_t, Function> Functions;
 typedef std::map<addr_t, Function *> ImportFunctions;
