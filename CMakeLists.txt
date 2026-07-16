@@ -204,6 +204,9 @@ install(FILES
 )
 
 install(FILES
+  ${CMAKE_SOURCE_DIR}/script/comdef.h
   ${CMAKE_SOURCE_DIR}/script/aebi.cc
+  ${CMAKE_SOURCE_DIR}/script/cutter.h
+  ${CMAKE_SOURCE_DIR}/script/cutter.h.cc
   DESTINATION ${CMAKE_INSTALL_PREFIX}
 )

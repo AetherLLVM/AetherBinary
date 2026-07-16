@@ -88,7 +88,7 @@ analyze_progress_t Binary::analyze_progress = [](const char *prefix, int cur,
 
     analyze_log("%s (%d%%)...\r", prefix, prog);
     if (prog == 100)
-      analyze_log("%128s\r", " ");
+      analyze_log("%80s\r", " ");
     if (analyze_log == (analyze_log_t)::printf ||
         analyze_log == (analyze_log_t)std::printf) {
       std::fflush(stdout);
