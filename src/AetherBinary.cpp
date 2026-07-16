@@ -2487,6 +2487,13 @@ Binary *New(const char *path, const char *triple, bool analyze) {
   if (!errOrBuff) {
     return nullptr;
   }
+  auto anybin = [&errOrBuff]() {
+    Binary *result = new AnyBinary;
+    // no need to hold analyzed buffer
+    result->holdBuffer(nullptr, errOrBuff.get().release());
+    result->analyze(nullptr);
+    return result;
+  };
   auto buff = errOrBuff->get();
   if (*(int *)buff->getBufferStart() == AETHER_FILE_ANA) {
     Binary *result = new AebiBinary;
@@ -2598,17 +2605,13 @@ Binary *New(const char *path, const char *triple, bool analyze) {
         return result;
       }
     }
-    Binary *result = new AnyBinary;
-    // no need to hold analyzed buffer
-    result->holdBuffer(nullptr, errOrBuff.get().release());
-    result->analyze(nullptr);
-    return result;
+    return anybin();
   }
 
   MemoryBufferRef buffref(*buff);
   auto errOrBin = object::createBinary(buffref);
   if (!errOrBin) {
-    return nullptr;
+    return anybin();
   }
   switch (magic) {
   case file_magic::macho_object:
@@ -2630,7 +2633,7 @@ Binary *New(const char *path, const char *triple, bool analyze) {
   case file_magic::elf_shared_object:
     return NewELF(errOrBin.get().release(), errOrBuff.get().release(), analyze);
   default:
-    return nullptr;
+    return anybin();
   }
 }
 
@@ -2641,9 +2644,11 @@ void Delete(Binary *bin) {
   delete bin;
 }
 
-void SetAnalyzeCallback(analyze_log_t log, analyze_progress_t prog) {
-  Binary::analyze_log = log;
-  Binary::analyze_progress = prog;
+void setAnalyzeCallback(analyze_log_t log, analyze_progress_t prog) {
+  if (log)
+    Binary::analyze_log = log;
+  if (prog)
+    Binary::analyze_progress = prog;
 }
 
 const char *getVersion() { return PROJECT_VERSION_STRING; }

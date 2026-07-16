@@ -4,10 +4,8 @@
 // See LICENSE file in the root directory for full license text.
 
 /*
-Usage: /path/to/icpp aether-binary.cc -- arm64-ios
-
-Note: Don't miss the double dashes --, otherwise icpp will treat the input
-binary file as a C++ source file, which will fail the whole command running.
+Usage: /path/to/icpp aether-binary.cc /path/to/file
+  e.g.: /path/to/icpp aether-binary.cc binary/ios-arm64
 */
 
 #include "aether-comm.h"

@@ -14,6 +14,10 @@ endif()
 
 project(AetherBinary)
 
+if(UNIX AND NOT APPLE)
+  set(LINUX TRUE)
+endif()
+
 # setup to use icpp's C++ runtime
 if(MSVC)
   set(LLVM_ENABLE_EH TRUE)
@@ -23,6 +27,14 @@ if(MSVC)
   )
   link_directories("${ICPP_INSTALL_DIR}/lib")
   add_link_options("/nodefaultlib:msvcprt.lib" c++.lib) 
+elseif(LINUX)
+  add_compile_options("-nostdinc++" "-nostdlib++" 
+    "-I${ICPP_INSTALL_DIR}/include/c++/v1"
+  )
+  add_link_options(@${CMAKE_SOURCE_DIR}/ld.txt
+    ${ICPP_INSTALL_DIR}/lib/libc++.so.1
+    ${ICPP_INSTALL_DIR}/lib/libc++abi.so.1 
+    ${ICPP_INSTALL_DIR}/lib/libunwind.so.1) 
 endif()
 
 # enable targets which remill supports even though AetherBinary doesn't support Sparc yet

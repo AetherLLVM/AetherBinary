@@ -146,7 +146,7 @@ protected:
   llvm::object::Binary *m_llvmbin;
 };
 
-__AETHER_API__ void SetAnalyzeCallback(analyze_log_t log,
+__AETHER_API__ void setAnalyzeCallback(analyze_log_t log,
                                        analyze_progress_t prog);
 __AETHER_API__ Binary *New(const char *path, const char *triple = nullptr,
                            bool analyze = true);

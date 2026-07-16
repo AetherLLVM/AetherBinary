@@ -76,6 +76,13 @@ void patch_file(std::string_view file) {
   else
     std::println("Ignored, it's already been patched.");
 }
+#elif __linux__
+std::string extra_cmake(std::string_view icpp_dir) {
+  return std::format(
+      " -DCMAKE_C_COMPILER={}/bin/clang -DCMAKE_CXX_COMPILER={}/bin/clang++ ",
+      icpp_dir, icpp_dir);
+}
+#define EXTRA_CMAKE extra_cmake(icpp_dir.string())
 #else
 #define EXTRA_CMAKE ""
 #endif
@@ -106,15 +113,26 @@ int main(int argc, const char *argv[]) {
                                      "ExecutionEngine/Orc/BacktraceTools.h");
 #endif
 
-    command("cmake -S {} -B {} -G Ninja -DICPP_INSTALL_DIR={}" EXTRA_CMAKE,
-            dqpath(llvm_cmake_dir), dqpath(llvm_build_dir), dqpath(icpp_dir));
+    command("cmake -S {} -B {} -G Ninja -DICPP_INSTALL_DIR={} {}",
+            dqpath(llvm_cmake_dir), dqpath(llvm_build_dir), dqpath(icpp_dir),
+            EXTRA_CMAKE);
 
+    // link icpp's c++ runtime libraries, so that llvm's table-gen can run
+    // normally
 #if _WIN32
-    // link icpp's c++.dll, so that llvm's table-gen can run normally
     auto dstcpp = llvm_build_dir / "llvm/bin/c++.dll";
     if (!fs::exists(dstcpp)) {
       std::println("Created symlink {}.", dstcpp.string());
       command("mklink {} {}", dqpath(dstcpp), dqpath(icpp_dir / "lib/c++.dll"));
+    }
+#elif __linux__
+    for (auto lib : {"c++", "c++abi", "unwind"}) {
+      auto name = std::format({"lib{}.so.1"}, lib);
+      auto dst = llvm_build_dir / "llvm/lib" / name;
+      if (fs::exists(dst))
+        break;
+      std::println("Created symlink {}.", dst.string());
+      command("ln -s {} {}", dqpath(icpp_dir / "lib" / name), dqpath(dst));
     }
 #endif
 
@@ -141,11 +159,11 @@ int main(int argc, const char *argv[]) {
   if (!fs::exists(aether_binary_build_dir / "build.ninja"))
     command("cmake -S {} -B {} -G Ninja -DCMAKE_BUILD_TYPE={} "
             "-DCMAKE_PREFIX_PATH={} -DCMAKE_INSTALL_PREFIX={} "
-            "-DLLVM_BUILD_DIR={} -DICPP_INSTALL_DIR={}" EXTRA_CMAKE,
+            "-DLLVM_BUILD_DIR={} -DICPP_INSTALL_DIR={} {}",
             dqpath(script_dir), dqpath(aether_binary_build_dir), build_type,
             dqpath(llvm_build_dir, "install"),
             dqpath(aether_binary_build_dir, "install"),
-            dqpath(llvm_build_dir, "llvm"), dqpath(icpp_dir));
+            dqpath(llvm_build_dir, "llvm"), dqpath(icpp_dir), EXTRA_CMAKE);
   command("cmake --build {} --target install", dqpath(aether_binary_build_dir));
 
   std::println("Build completed.");

@@ -6,6 +6,10 @@
 cmake_minimum_required(VERSION 3.20)
 project(AetherBinary VERSION 0.1.0 LANGUAGES C CXX)
 
+if(UNIX AND NOT APPLE)
+  set(LINUX TRUE)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -25,6 +29,14 @@ if(MSVC)
   )
   link_directories("${ICPP_INSTALL_DIR}/lib")
   add_link_options("/nodefaultlib:msvcprt.lib" c++.lib) 
+elseif(LINUX)
+  add_compile_options("-nostdinc++" "-nostdlib++" 
+    "-I${ICPP_INSTALL_DIR}/include/c++/v1"
+  )
+  add_link_options(@${CMAKE_SOURCE_DIR}/cmake/llvm/ld.txt
+    ${ICPP_INSTALL_DIR}/lib/libc++.so.1
+    ${ICPP_INSTALL_DIR}/lib/libc++abi.so.1 
+    ${ICPP_INSTALL_DIR}/lib/libunwind.so.1) 
 endif()
 
 configure_file(
@@ -175,15 +187,23 @@ install(FILES
 if(MSVC)
   set(LIBLLVM "LLVM-22.dll")
   set(LIBLLVMDIR ${LLVM_TOOLS_BINARY_DIR})
+  set(LLVM_INSTALL_DIR ${CMAKE_INSTALL_BINDIR})
 elseif(APPLE)
   set(LIBLLVM "libLLVM.dylib")
   set(LIBLLVMDIR ${LLVM_LIBRARY_DIRS})
+  set(LLVM_INSTALL_DIR ${CMAKE_INSTALL_LIBDIR})
 else()
-  set(LIBLLVM "libLLVM.so")
+  set(LIBLLVM "libLLVM.so.22.1")
   set(LIBLLVMDIR ${LLVM_LIBRARY_DIRS})
+  set(LLVM_INSTALL_DIR ${CMAKE_INSTALL_LIBDIR})
 endif()
 
 install(FILES
   ${LIBLLVMDIR}/${LIBLLVM}
-  DESTINATION ${CMAKE_INSTALL_BINDIR}
+  DESTINATION ${LLVM_INSTALL_DIR}
+)
+
+install(FILES
+  ${CMAKE_SOURCE_DIR}/script/aebi.cc
+  DESTINATION ${CMAKE_INSTALL_PREFIX}
 )
