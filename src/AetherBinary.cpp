@@ -689,14 +689,14 @@ void Binary::dump(addr_t start, addr_t end) const {
     return;
   }
 
-  auto sectbuff = addrBuff(start);
+  auto sectbuff = addrBuff(sect->addr);
   analyze_log("%s\n", std::format("Section {}:", sect->name).c_str());
   for (auto addr = start; addr < end;) {
     if (addr >= sect->addr + sect->size) {
       sect = addrSect(addr);
       if (!sect)
         break;
-      sectbuff = addrBuff(addr);
+      sectbuff = addrBuff(sect->addr);
       analyze_log("%s\n", std::format("Section {}:", sect->name).c_str());
     }
     auto buff = sectbuff + addr - sect->addr;

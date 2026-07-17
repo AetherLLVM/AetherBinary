@@ -85,7 +85,7 @@ if(MSVC)
   target_link_directories(AetherBinary PRIVATE ${LLVM_LIBRARY_DIRS})
   target_link_libraries(AetherBinary PRIVATE LLVM-22 LLVMSupport)
 else()
-  target_link_libraries(AetherBinary PRIVATE LLVM)
+  target_link_libraries(AetherBinary PRIVATE LLVM LLVMSupport)
 endif()
 
 target_include_directories(AetherBinary PRIVATE 
