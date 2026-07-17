@@ -1,5 +1,5 @@
 # AetherBinary - A library for MachO/ELF/PE analysis
-**AetherBinary** is the backend analysis engine for MachO/ELF/PE used by [AetherLLVM](https://github.com/AetherLLVM), which is an LLVM-native binary analysis and emulation platform built around instruction lifting to **LLVM IR**. 
+**AetherBinary** is the backend analysis engine for MachO/ELF/PE used by [AetherVM](https://github.com/AetherVM), which is an LLVM-native binary analysis and emulation platform built around instruction lifting to **LLVM IR**. 
 
 But, it can be played with in [Cutter](https://github.com/rizinorg/cutter) or Terminal within a C++ REPL, too.
 
@@ -94,7 +94,7 @@ Section __cstring:
 10003abb0 62 61 63 6b 74 72 61 63 65 2f 73 72 63 2f 73 79 
 ```
 ### Screenshot
-![Screenshot](https://raw.githubusercontent.com/AetherLLVM/AetherBinary/main/screenshot/Cutter++.png)
+![Screenshot](https://raw.githubusercontent.com/AetherVM/AetherBinary/main/screenshot/Cutter++.png)
 
 ## Build
 To build your own version, you need to have [ICPP](https://github.com/vpand/icpp), **Ninja**, **CMake** available in current terminal session. After a recursive clone of this repo, then build it in one go:
@@ -104,7 +104,7 @@ To build your own version, you need to have [ICPP](https://github.com/vpand/icpp
 After aaa... while, the package should be at: build-Release/install.
 
 ## Issue
-If you encounter any problems when using AetherBinary, before opening an issue, please check the [Bug Report](https://github.com/AetherLLVM/AetherBinary/blob/main/.github/ISSUE_TEMPLATE/bug_report.md) template, and provide as many details as you can. Only if we can reproduce the problem, we can then solve it.
+If you encounter any problems when using AetherBinary, before opening an issue, please check the [Bug Report](https://github.com/AetherVM/AetherBinary/blob/main/.github/ISSUE_TEMPLATE/bug_report.md) template, and provide as many details as you can. Only if we can reproduce the problem, we can then solve it.
 
 ## Contact
 If you have any questions or thoughts, just feel free to email to me:

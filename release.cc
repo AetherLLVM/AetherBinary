@@ -60,7 +60,7 @@ int main(int argc, const char *argv[]) {
   pack_dir(script_dir / "build-Release/install", dstroot, pkgname);
 
   auto targz = std::format("{}.tar.gz", pkgname);
-  std::println("Packing AetherLLVM release package {}...", targz);
+  std::println("Packing AetherVM release package {}...", targz);
 #if __APPLE__
   std::system(
       std::format("find {} -name .DS_Store -delete", dstroot.string()).data());
@@ -68,6 +68,6 @@ int main(int argc, const char *argv[]) {
   std::system(
       std::format("cd {} && tar czf {} {}", dstroot.string(), targz, pkgname)
           .data());
-  std::println("Created AetherLLVM package {}.", targz);
+  std::println("Created AetherVM package {}.", targz);
   return 0;
 }
