@@ -483,7 +483,7 @@ bool MachOBinary::analyze(const void *llvmbin) {
     if (sect.name.length() > 16)
       sect.name = std::string(sect.name.data(), 16);
     if (sect.name == "__mod_init_func" || sect.name == "__mod_term_func") {
-      auto ptr = (uint64_t *)addrBuff(sect.addr);
+      auto ptr = (addr_t *)addrBuff(sect.addr);
       auto flag = strstr(sect.name.data(), "init") ? MFF_CTOR : MFF_DTOR;
       for (size_t i = 0; i < sect.size / 8; i++) {
         if (ptr[i]) {
