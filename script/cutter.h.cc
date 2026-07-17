@@ -5,9 +5,6 @@
 
 #include "comdef.h"
 
-// local storage, keep BINENV valid all the time
-static std::string bin_env;
-
 int main(int argc, const char *argv[]) {
   if (argc != 3) {
     std::println("Usage: {} /path/to/file log-function-pointer", argv[0]);
@@ -32,7 +29,11 @@ int main(int argc, const char *argv[]) {
             "with a binary file using C++.",
             aether::getVersion());
   // return BIN within BINENV
-  bin_env = std::format("{}={:p}", BINENV, (void *)inst);
-  putenv((char *)bin_env.c_str());
+  auto sptr = std::format("{:p}", (void *)inst);
+#if _WIN32
+  _putenv_s(BINENV, sptr.c_str());
+#else
+  setenv(BINENV, sptr.c_str(), true);
+#endif
   return 0;
 }

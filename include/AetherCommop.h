@@ -36,11 +36,6 @@ public:
       fname += 1;
     }
     std::set<addr_t> newfunc, datas;
-    for (auto &sect : m_bin->m_sects) {
-      if (sect.second.type == TEXT && sect.second.addr != m_bin->imageBase()) {
-        newfunc.insert(sect.second.addr);
-      }
-    }
     bool hasfnstarts = m_bin->hasFuncStarts();
     int prog = 1, progtmp;
     char progprefix[256];

@@ -703,7 +703,8 @@ void Binary::dump(addr_t start, addr_t end) const {
     if (sect->type == TEXT) {
       if (!func || addr >= func->end) {
         func = addrFunc(addr);
-        analyze_log("%s\n", std::format("Function {}:", func->name).c_str());
+        if (func)
+          analyze_log("%s\n", std::format("Function {}:", func->name).c_str());
       }
       std::string insn;
       auto oplen = diser()->disassemble((unsigned char *)buff, 16, insn);
@@ -1082,6 +1083,20 @@ bool Binary::analyze(const void *llvmbin) {
 
   initImports(llvmbin);
   parseSymtab(llvmbin);
+
+  if (!m_funcs.size()) {
+    // the start of TEXT section should be a function start anyway
+    for (auto &sect : m_sects) {
+      if (sect.second.type == TEXT && sect.second.addr != imageBase()) {
+        auto start = sect.second.addr;
+        auto &newfunc =
+            m_funcs.insert(std::make_pair(start, Function())).first->second;
+        newfunc.start = start;
+        strfmt(newfunc.name, AETHER_ANOYPREFIX "" ADDRFMT "", start);
+        log_newfunc(&newfunc);
+      }
+    }
+  }
   return true;
 }
 
