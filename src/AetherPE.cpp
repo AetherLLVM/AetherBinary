@@ -1,6 +1,6 @@
 // AetherBinary - A library for MachO/ELF/PE analysis.
 // Copyright (c) 2026 Jesse Liu <neoliu2011@gmail.com>
-// SPDX-License-Identifier: AGPL-3.0-or-later */
+// SPDX-License-Identifier: Apache License, Version 2.0
 // See LICENSE file in the root directory for full license text.
 
 #include "AetherPE.h"
