@@ -19,6 +19,8 @@ public:
   Machine() {}
   virtual ~Machine() {}
 
+  ArchType archType() { return m_arch; }
+
   void analyzeFunc(bool hasfnstarts, Disassembler *diser, const char *opbuff,
                    addr_t start, addr_t end, std::set<addr_t> &newfunc,
                    bool thumb = false, std::set<addr_t> *datas = nullptr);
