@@ -1,7 +1,5 @@
 // AetherBinary - A library for MachO/ELF/PE analysis.
 // Copyright (c) 2026 Jesse Liu <neoliu2011@gmail.com>
-// SPDX-License-Identifier: Apache License, Version 2.0
-// See LICENSE file in the root directory for full license text.
 
 //===-- llvm-mc.cpp - Machine Code Hacking Driver ---------------*- C++ -*-===//
 //
@@ -348,17 +346,16 @@ int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
 
   // Register the target printer for --version.
   cl::AddExtraVersionPrinter(TargetRegistry::printRegisteredTargetsForVersion);
+  cl::ParseCommandLineOptions(argc, argv, "llvm machine code playground\n");
+  setDwarfDebugFlags(argc, argv);
+  setDwarfDebugProducer();
 #endif
 
-  cl::ParseCommandLineOptions(argc, argv, "llvm machine code playground\n");
   MCTargetOptions MCOptions = mc::InitMCTargetOptionsFromFlags();
   MCOptions.ShowMCEncoding = true; // force it to show the opcode we need
 #if LLVM_VERSION_MAJOR >= 22
   MCOptions.AsmVerbose = true;
 #endif
-  setDwarfDebugFlags(argc, argv);
-
-  setDwarfDebugProducer();
 
   const char *ProgName = argv[0];
   const Target *TheTarget = GetTarget(ProgName);
@@ -370,7 +367,7 @@ int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
 
   ErrorOr<std::unique_ptr<MemoryBuffer>> BufferPtr =
       // MemoryBuffer::getFileOrSTDIN(InputFilename)
-      MemoryBuffer::getMemBuffer(InputFilename);
+      MemoryBuffer::getMemBuffer(argv[3]);
   if (std::error_code EC = BufferPtr.getError()) {
     WithColor::error(errs(), ProgName)
         << InputFilename << ": " << EC.message() << '\n';
@@ -463,6 +460,8 @@ int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
   MOFI.InitMCObjectFileInfo(TheTriple, PIC, Ctx, LargeCodeModel);
 #endif
 
+#if USE_CACHE_INST
+#else
 #if LLVM_VERSION_MAJOR < 22
   if (SaveTempLabels)
     Ctx.setAllowTemporaryLabels(false);
@@ -498,11 +497,9 @@ int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
   if (GenDwarfForAssembly)
     Ctx.setGenDwarfRootFile(InputFilename, Buffer->getBuffer());
 
-#if 0
-  sys::fs::OpenFlags Flags = (FileType == OFT_AssemblyFile) ? sys::fs::OF_Text
-                                                            : sys::fs::OF_None;
+  sys::fs::OpenFlags Flags =
+      (FileType == OFT_AssemblyFile) ? sys::fs::OF_Text : sys::fs::OF_None;
   std::unique_ptr<ToolOutputFile> Out = GetOutputStream(OutputFilename, Flags);
-#endif
 
   std::unique_ptr<ToolOutputFile> DwoOut;
   if (!SplitDwarfFile.empty()) {
@@ -514,6 +511,7 @@ int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
     if (!DwoOut)
       return 1;
   }
+#endif
 
   std::unique_ptr<buffer_ostream> BOS;
   raw_pwrite_stream *OS = rawos;
@@ -627,9 +625,11 @@ int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
   (void)disassemble;
 #endif
 
+#if USE_CACHE_INST
+#else
   // Keep output if no errors.
   if (Res == 0) {
-    // Out->keep();
+    Out->keep();
     if (DwoOut)
       DwoOut->keep();
   }
@@ -638,6 +638,7 @@ int llvm_mc_main(int argc, char **argv, raw_pwrite_stream *rawos, void *ctx) {
   TripleName.reset();
   InputFilename.reset();
   OutputAsmVariant.reset();
+#endif
 
   return Res;
 }

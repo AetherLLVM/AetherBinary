@@ -4,7 +4,7 @@
 # See LICENSE file in the root directory for full license text.
 
 cmake_minimum_required(VERSION 3.20)
-project(AetherBinary VERSION 0.1.0 LANGUAGES C CXX)
+project(AetherBinary VERSION 0.1.1 LANGUAGES C CXX)
 
 if(UNIX AND NOT APPLE)
   set(LINUX TRUE)

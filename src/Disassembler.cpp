@@ -243,9 +243,7 @@ public:
 
     const char *features = "";
     if (strstr(arch, "arm64") || strstr(arch, "aarch64")) {
-      features =
-          "+aes,+crc,+dotprod,+fp-armv8,+fp16fml,+fullfp16,+lse,+neon,+ras,+"
-          "rcpc,+rdm,+sha2,+sha3,+v8.1a,+v8.2a,+v8.3a,+v8.4a,+v8.5a";
+      features = "+all";
     }
 
     Triple triple(TripleName);
